@@ -1,0 +1,14 @@
+name: loop-risk-simulator-gui
+channels:
+  - defaults
+  - conda-forge
+
+dependencies:
+  - pandas=2.2.2
+  - pip=24.2
+  - pytest=7.4.4
+  - python=3.12.7
+
+  - pip:
+    - streamlit==1.59.2
+    - -e ../data-science-simulator
