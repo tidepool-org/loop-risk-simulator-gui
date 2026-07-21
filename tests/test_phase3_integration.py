@@ -36,9 +36,14 @@ import pytest
 
 pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
+from tidepool_data_science_simulator.utils import PROJECT_ROOT_DIR  # noqa: E402
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LIBRARY_ROOT = os.path.join(REPO_ROOT, "scenario_configs", "tidepool_risk_v2", "loop_risk_v2_0")
+# Deviation from the original (data-science-simulator) version of this file: REPO_ROOT
+# there was os.path.dirname(os.path.dirname(os.path.abspath(__file__))), which assumed
+# scenario_configs/ lives in the same repo as this test. It doesn't in this repo --
+# scenario_configs/ stays in the simulator. Use PROJECT_ROOT_DIR (the editable-installed
+# simulator's root) instead, same source streamlit_app.py's own LIBRARY_ROOT already uses.
+LIBRARY_ROOT = os.path.join(PROJECT_ROOT_DIR, "scenario_configs", "tidepool_risk_v2", "loop_risk_v2_0")
 REAL_COLLECTION = "test"  # scenario_configs/.../loop_risk_v2_0/test -- 8 real TLR-* dirs
 
 FIXTURES_COLLECTION_NAME = "_pytest_phase3_integration_fixtures"
