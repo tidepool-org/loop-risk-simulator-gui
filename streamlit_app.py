@@ -24,6 +24,21 @@ from tidepool_data_science_simulator.projects.risk.gui_runner import (
 
 LIBRARY_ROOT = os.path.join(PROJECT_ROOT_DIR, "scenario_configs", "tidepool_risk_v2", "loop_risk_v2_0")
 
+# Interim allowlist restricting the selector to the two collections in active
+# use. Remove once the library gains a first-class notion of "active" vs
+# "archived" collections.
+#
+# Overridable via env var so integration tests can register their own
+# synthetic/temp fixture collections without the production UI seeing them --
+# AppTest execs this file fresh per test, so an env var (read at import time,
+# set by the test before `AppTest.from_file`) is the only seam available; a
+# module-level monkeypatch wouldn't reach the exec'd copy.
+_env_override = os.environ.get("LOOP_RISK_GUI_ALLOWED_COLLECTIONS")
+_ALLOWED_COLLECTIONS = (
+    tuple(_env_override.split(",")) if _env_override
+    else ("loop_risk_v2_2_0_full", "loop_risk_v2_510k")
+)
+
 STAGE_ORDER = ["pre", "no_loop", "post"]
 STAGE_DISPLAY = {"pre": "Pre-mitigation", "no_loop": "No Loop", "post": "Post-mitigation"}
 
@@ -31,7 +46,16 @@ STAGE_DISPLAY = {"pre": "Pre-mitigation", "no_loop": "No Loop", "post": "Post-mi
 def _list_collections():
     if not os.path.isdir(LIBRARY_ROOT):
         return []
-    return sorted(d for d in os.listdir(LIBRARY_ROOT) if os.path.isdir(os.path.join(LIBRARY_ROOT, d)))
+    missing = [
+        name for name in _ALLOWED_COLLECTIONS
+        if not os.path.isdir(os.path.join(LIBRARY_ROOT, name))
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"Allowlisted config collection(s) not found under {LIBRARY_ROOT}: {missing}. "
+            "Update _ALLOWED_COLLECTIONS in streamlit_app.py if these were renamed or removed."
+        )
+    return list(_ALLOWED_COLLECTIONS)
 
 
 def _list_tlr_dirs(collection_dir):
