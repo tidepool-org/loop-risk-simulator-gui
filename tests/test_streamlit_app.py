@@ -44,7 +44,7 @@ def test_app_loads_and_lists_real_collections():
 def test_single_directory_scope_populates_tlr_selectbox():
     at = AppTest.from_file("streamlit_app.py", default_timeout=30)
     at.run()
-    at.selectbox[0].select("loop_risk_v2_exploratory").run()
+    at.selectbox[0].select("loop_risk_v2_2_0_full").run()
     at.radio[0].set_value("One specific directory").run()
 
     assert not at.exception

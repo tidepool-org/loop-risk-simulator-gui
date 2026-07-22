@@ -62,7 +62,18 @@ _BASE_CONFIG_PATH = os.path.join(
 def synthetic_fixtures():
     """Create the warn/error/no-data TLR-* dirs as a sibling collection of
     real ones (so _find_pointer_object_dir resolves the real reusable/ dir
-    two levels up, exactly as for any real collection), torn down after."""
+    two levels up, exactly as for any real collection), torn down after.
+
+    Also registers this module's collection names (the real "test" collection
+    plus the two synthetic ones) against streamlit_app.py's collection
+    allowlist for the duration of the module -- see the env var override
+    documented next to _ALLOWED_COLLECTIONS in streamlit_app.py.
+    """
+    prior_env = os.environ.get("LOOP_RISK_GUI_ALLOWED_COLLECTIONS")
+    os.environ["LOOP_RISK_GUI_ALLOWED_COLLECTIONS"] = ",".join(
+        [REAL_COLLECTION, FIXTURES_COLLECTION_NAME, MULTI_COLLECTION_NAME]
+    )
+
     with open(_BASE_CONFIG_PATH) as fh:
         base_config = json.load(fh)
 
@@ -115,6 +126,10 @@ def synthetic_fixtures():
 
     shutil.rmtree(FIXTURES_COLLECTION_DIR, ignore_errors=True)
     shutil.rmtree(MULTI_COLLECTION_DIR, ignore_errors=True)
+    if prior_env is None:
+        os.environ.pop("LOOP_RISK_GUI_ALLOWED_COLLECTIONS", None)
+    else:
+        os.environ["LOOP_RISK_GUI_ALLOWED_COLLECTIONS"] = prior_env
 
 
 def _select_collection(at, collection_name):
