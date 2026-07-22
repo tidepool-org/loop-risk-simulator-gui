@@ -1,14 +1,63 @@
 name: loop-risk-simulator-gui
+# ---------------------------------------------------------------------------
+# Phase 4: pinned-dependency environment (was: -e ../data-science-simulator).
+#
+# The simulator is now pulled in as a PINNED GIT REF, not an editable sibling
+# checkout -- the two repos no longer need to be cloned as siblings. This is
+# the single source of truth for the dependency pins; the bundle's env spec is
+# rendered from THIS file by packaging/build_bundle.py (which swaps only the
+# LoopAlgorithmToPython line for the vendored copy). Keep pins here in sync.
+#
+# Dependency set follows the simulator's packaging-ready recipe
+# (data-science-simulator/conda-environment-swift.yml), arm64-corrected: the
+# `gcc` pin from that recipe is intentionally omitted (Phase 0 finding: gcc is
+# unavailable on arm64 conda and unused -- the Swift build uses clang via Xcode
+# CLT). Dev-only tooling (black/flake8/mypy/pre-commit/coverage) is dropped;
+# this env only needs to run the app and its tests.
+#
+# ARCHITECTURE REQUIREMENT (Phase 0): the Python running this env must match
+# the arm64 libLoopAlgorithmToPython.dylib. Create with an arm64 conda
+# (~/miniconda3), never the x86_64 Anaconda at /opt/anaconda3, never `uv run`.
+#
+# ROLLBACK (High regression risk -- see README): to return to the Phase 3
+# editable/sibling model, replace the pinned data-science-simulator line below
+# with `- -e ../data-science-simulator` and re-clone the two repos as siblings.
+# ---------------------------------------------------------------------------
 channels:
   - defaults
   - conda-forge
 
 dependencies:
+  - matplotlib=3.9.2
+  - numexpr=2.8.7
+  - numpy=1.26.4
   - pandas=2.2.2
   - pip=24.2
+  - plotly=5.24.1
+  - plotly-orca=3.4.2
   - pytest=7.4.4
   - python=3.12.7
+  - requests=2.32.3
+  - scipy=1.13.1
+  - seaborn=0.13.2
 
   - pip:
     - streamlit==1.59.2
-    - -e ../data-science-simulator
+    - pydantic>=2.0
+    - openpyxl==3.1.5
+    - backports-datetime-fromisoformat==2.0.2
+    - pip-chill==1.0.3
+    - python-dotenv==1.0.1
+    # Simulator runtime deps -- pinned exactly as the simulator's swift recipe.
+    - git+https://github.com/tidepool-org/data-science-models@sf/incorporate_pa
+    - git+https://github.com/tidepool-org/Pyloopkit
+    - git+https://github.com/tidepool-org/data-science-metrics
+    # The simulator itself, PINNED (Phase 4 migration). post_processing/ and
+    # scenario_configs/ do NOT ship with this install (not part of the package);
+    # the packaged bundle vendors them from this same tag. For a dev checkout,
+    # point LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT / LOOP_RISK_GUI_POST_PROCESSING_DIR
+    # at a simulator checkout, or use the editable rollback above.
+    - git+https://github.com/tidepool-org/data-science-simulator@gui-bundle-v0.1.0
+    # Swift binding: editable sibling for dev; the bundle swaps this for its
+    # vendored copy (./vendor/LoopAlgorithmToPython).
+    - -e ../LoopAlgorithmToPython

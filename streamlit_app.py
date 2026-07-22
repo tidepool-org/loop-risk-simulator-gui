@@ -22,7 +22,19 @@ from tidepool_data_science_simulator.projects.risk.gui_runner import (
     validate_config_dir,
 )
 
-LIBRARY_ROOT = os.path.join(PROJECT_ROOT_DIR, "scenario_configs", "tidepool_risk_v2", "loop_risk_v2_0")
+# Root of the config library the selector browses. Defaults to the simulator's
+# in-tree scenario_configs (correct for an editable/sibling install). Under the
+# Phase 4 packaged bundle the simulator is a pinned, non-editable install, so
+# PROJECT_ROOT_DIR points into site-packages where scenario_configs does NOT
+# ship (it isn't part of the installed package) -- the bundle launcher sets
+# LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT to the vendored subtree instead. Same env
+# seam the integration tests use to point at a temp fixture root. Unset -> today's
+# behavior, so editable/dev checkouts are unaffected.
+_scenario_configs_root = os.environ.get("LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT")
+if _scenario_configs_root:
+    LIBRARY_ROOT = os.path.join(_scenario_configs_root, "tidepool_risk_v2", "loop_risk_v2_0")
+else:
+    LIBRARY_ROOT = os.path.join(PROJECT_ROOT_DIR, "scenario_configs", "tidepool_risk_v2", "loop_risk_v2_0")
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Tidepool_Logo_Light_Large_3000.jpg")
 
 # Interim allowlist restricting the selector to the two collections in active
