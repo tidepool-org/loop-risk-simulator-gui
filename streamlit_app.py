@@ -23,6 +23,7 @@ from tidepool_data_science_simulator.projects.risk.gui_runner import (
 )
 
 LIBRARY_ROOT = os.path.join(PROJECT_ROOT_DIR, "scenario_configs", "tidepool_risk_v2", "loop_risk_v2_0")
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Tidepool_Logo_Light_Large_3000.jpg")
 
 # Interim allowlist restricting the selector to the two collections in active
 # use. Remove once the library gains a first-class notion of "active" vs
@@ -193,8 +194,48 @@ def _render_progress_fragment():
     st.rerun()
 
 
+# DM Sans is the sanctioned web fallback for Basis Grotesque Pro (not
+# licensed for web embedding). Streamlit's own expander already resolves
+# secondaryBackgroundColor (brand indigo, #281946) against textColor with
+# adequate contrast on its own -- verified against a throwaway probe app --
+# so it needs no override. Input-style widgets (selectbox, text/number
+# input) don't get the same treatment: their value box also renders on
+# secondaryBackgroundColor but keeps the page's default (indigo) text,
+# making it unreadable, so those need a targeted fix below.
+_BRAND_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&display=swap');
+
+/* Streamlit's own typography rules win on specificity against a plain
+   html/body selector, so this needs !important to actually take. */
+.stApp, .stApp * {
+    font-family: 'DM Sans', sans-serif !important;
+}
+
+/* Their label stays on the page background and must keep the default dark
+   text, so only the value box (input/select + its role="group" wrapper)
+   gets the light override, not the whole widget. */
+[data-testid="stSelectbox"] div[role="group"],
+[data-testid="stMultiSelect"] div[role="group"],
+[data-testid="stTextInput"] div[role="group"],
+[data-testid="stNumberInput"] div[role="group"],
+[data-testid="stTextArea"] div[role="group"],
+[data-testid="stSelectbox"] input,
+[data-testid="stMultiSelect"] input,
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input,
+[data-testid="stTextArea"] textarea {
+    color: #F5F5FA;
+}
+</style>
+"""
+
+
 def main():
     st.set_page_config(page_title="Tidepool Loop Risk Assessment", layout="wide")
+    st.markdown(_BRAND_CSS, unsafe_allow_html=True)
+    if os.path.exists(LOGO_PATH):
+        st.logo(LOGO_PATH, size="large")
     _init_session_state()
     st.title("Tidepool Loop Risk Assessment")
 
