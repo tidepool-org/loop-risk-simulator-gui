@@ -7,24 +7,24 @@ against real scenario_configs/ data, no mocks in the exercised path.
 Assertions target the structured result objects / GUI state at the
 select-config -> run -> render boundary, not internal function calls.
 
-Real, non-PHI fixtures used:
-- Happy path: a single real directory from
-  scenario_configs/tidepool_risk_v2/loop_risk_v2_0/test/ (TLR-QAE-482-test).
+Fixtures live in a test-controlled temp library (Phase 4 relocation -- see the
+synthetic_library fixture), built once per module from the real scenario_configs/
+so nothing is written into the installed library. All data is real, non-PHI:
+- Happy path: the real TLR-QAE-482-test directory (copied into the temp library).
 - Multi-TLR / cancel: NOT the whole "test" collection -- it has a pre-existing
   broken config (TLR-000-base's t2_resistant profile references a reusable
   file under reusable/simulations/versions/, a subdirectory ScenarioParserV2's
   load_pointer doesn't search for "simulations" references; found while
   writing this suite, flagged separately, not fixed here). A dedicated
-  2-directory fixture collection (both copies of the known-good
-  TLR-QAE-482-test config) is used instead.
+  2-directory synthetic collection (copies of the known-good TLR-QAE-482-test
+  config) is used instead.
 - Warnings / errors / no-data: no real config in the library happens to
-  trigger these (confirmed by grep before writing this), so a temp sibling
-  collection is created under the same library root (so reference
-  resolution to reusable/ works exactly as it does for real collections)
-  with one deliberately-crafted TLR-* directory each.
+  trigger these (confirmed by grep before writing this), so synthetic TLR-*
+  directories are crafted in the temp library, one per case. reusable/ is
+  symlinked into the temp layout so `reusable.*` pointer resolution works
+  exactly as it does for a real collection.
 
-All synthetic fixture collections are created fresh and torn down after the
-module's tests run.
+The temp library is created fresh and auto-removed after the module's tests.
 """
 
 import json
@@ -38,48 +38,78 @@ pytest.importorskip("streamlit")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 from tidepool_data_science_simulator.utils import PROJECT_ROOT_DIR  # noqa: E402
 
-# Deviation from the original (data-science-simulator) version of this file: REPO_ROOT
-# there was os.path.dirname(os.path.dirname(os.path.abspath(__file__))), which assumed
-# scenario_configs/ lives in the same repo as this test. It doesn't in this repo --
-# scenario_configs/ stays in the simulator. Use PROJECT_ROOT_DIR (the editable-installed
-# simulator's root) instead, same source streamlit_app.py's own LIBRARY_ROOT already uses.
-LIBRARY_ROOT = os.path.join(PROJECT_ROOT_DIR, "scenario_configs", "tidepool_risk_v2", "loop_risk_v2_0")
-REAL_COLLECTION = "test"  # scenario_configs/.../loop_risk_v2_0/test -- 8 real TLR-* dirs
+# Phase 4 fixture relocation: previously these synthetic collections were written
+# directly into the installed library root (LIBRARY_ROOT under the simulator's
+# PROJECT_ROOT_DIR). That only worked while the simulator was an editable checkout
+# -- under a pinned/vendored non-editable install that root isn't a writable,
+# disposable location. They now live in a test-controlled temp library built by
+# the synthetic_library fixture, which replicates the real layout from the
+# tidepool_risk_v2 level down (symlinking the real reusable/ so `reusable.*`
+# pointer resolution works exactly as for a real collection) and points the app
+# at it via the same LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT seam streamlit_app uses.
+REAL_COLLECTION = "test"
+REAL_DIR_NAME = "TLR-QAE-482-test"
+BASE_CONFIG_FILENAME = "Simulation-Configuration-TLR-QAE-482-test_median_v1.json"
 
 FIXTURES_COLLECTION_NAME = "_pytest_phase3_integration_fixtures"
-FIXTURES_COLLECTION_DIR = os.path.join(LIBRARY_ROOT, FIXTURES_COLLECTION_NAME)
-
 MULTI_COLLECTION_NAME = "_pytest_phase3_integration_multi"
-MULTI_COLLECTION_DIR = os.path.join(LIBRARY_ROOT, MULTI_COLLECTION_NAME)
 
-_BASE_CONFIG_PATH = os.path.join(
-    LIBRARY_ROOT, REAL_COLLECTION, "TLR-QAE-482-test",
-    "Simulation-Configuration-TLR-QAE-482-test_median_v1.json",
-)
+
+def _source_scenario_configs_root():
+    """The real scenario_configs/ currently in effect -- the vendored bundle copy
+    (via the env seam) if set, else the editable-install checkout. This is what
+    the temp library is built from."""
+    override = os.environ.get("LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT")
+    return override if override else os.path.join(PROJECT_ROOT_DIR, "scenario_configs")
 
 
 @pytest.fixture(scope="module", autouse=True)
-def synthetic_fixtures():
-    """Create the warn/error/no-data TLR-* dirs as a sibling collection of
-    real ones (so _find_pointer_object_dir resolves the real reusable/ dir
-    two levels up, exactly as for any real collection), torn down after.
+def synthetic_library(tmp_path_factory):
+    """Build a self-contained temp scenario library and point the app at it.
 
-    Also registers this module's collection names (the real "test" collection
-    plus the two synthetic ones) against streamlit_app.py's collection
-    allowlist for the duration of the module -- see the env var override
-    documented next to _ALLOWED_COLLECTIONS in streamlit_app.py.
+    Layout mirrors the real one from the tidepool_risk_v2 level down:
+        <temp>/tidepool_risk_v2/reusable            -> symlink to real reusable/
+        <temp>/tidepool_risk_v2/loop_risk_v2_0/test/TLR-QAE-482-test  (copied)
+        <temp>/tidepool_risk_v2/loop_risk_v2_0/<synthetic collections>
+    so `reusable.*` pointer resolution (which walks up to the tidepool_risk_v2
+    level) works identically to a real collection, with zero writes into the
+    installed library. Registers the collection names against the app allowlist
+    for the module. Torn down after (env restored; temp dir auto-removed).
     """
-    prior_env = os.environ.get("LOOP_RISK_GUI_ALLOWED_COLLECTIONS")
+    prior_configs_root = os.environ.get("LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT")
+    prior_allowed = os.environ.get("LOOP_RISK_GUI_ALLOWED_COLLECTIONS")
+
+    source_root = _source_scenario_configs_root()
+    source_lib = os.path.join(source_root, "tidepool_risk_v2", "loop_risk_v2_0")
+    source_reusable = os.path.join(source_root, "tidepool_risk_v2", "reusable")
+
+    temp_root = str(tmp_path_factory.mktemp("scenario_lib"))
+    temp_v2 = os.path.join(temp_root, "tidepool_risk_v2")
+    library_root = os.path.join(temp_v2, "loop_risk_v2_0")
+    os.makedirs(library_root, exist_ok=True)
+    # Symlink reusable/ (18MB, 4500+ files) rather than copy -- resolution only
+    # needs the path to exist at the tidepool_risk_v2 level.
+    os.symlink(source_reusable, os.path.join(temp_v2, "reusable"))
+    # Copy the one real collection the happy path runs against.
+    shutil.copytree(
+        os.path.join(source_lib, REAL_COLLECTION, REAL_DIR_NAME),
+        os.path.join(library_root, REAL_COLLECTION, REAL_DIR_NAME),
+    )
+
+    os.environ["LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT"] = temp_root
     os.environ["LOOP_RISK_GUI_ALLOWED_COLLECTIONS"] = ",".join(
         [REAL_COLLECTION, FIXTURES_COLLECTION_NAME, MULTI_COLLECTION_NAME]
     )
 
-    with open(_BASE_CONFIG_PATH) as fh:
+    fixtures_collection_dir = os.path.join(library_root, FIXTURES_COLLECTION_NAME)
+    multi_collection_dir = os.path.join(library_root, MULTI_COLLECTION_NAME)
+
+    with open(os.path.join(library_root, REAL_COLLECTION, REAL_DIR_NAME, BASE_CONFIG_FILENAME)) as fh:
         base_config = json.load(fh)
 
-    warn_dir = os.path.join(FIXTURES_COLLECTION_DIR, "TLR-WARN-TEST")
-    err_dir = os.path.join(FIXTURES_COLLECTION_DIR, "TLR-ERR-TEST")
-    nodata_dir = os.path.join(FIXTURES_COLLECTION_DIR, "TLR-NODATA-TEST")
+    warn_dir = os.path.join(fixtures_collection_dir, "TLR-WARN-TEST")
+    err_dir = os.path.join(fixtures_collection_dir, "TLR-ERR-TEST")
+    nodata_dir = os.path.join(fixtures_collection_dir, "TLR-NODATA-TEST")
     os.makedirs(warn_dir, exist_ok=True)
     os.makedirs(err_dir, exist_ok=True)
     os.makedirs(nodata_dir, exist_ok=True)
@@ -112,8 +142,8 @@ def synthetic_fixtures():
     # during the second directory's processing for a cancel to land after the
     # first directory's progress has already fired, instead of a race decided in
     # a single Python statement gap.
-    multi_dir_a = os.path.join(MULTI_COLLECTION_DIR, "TLR-MULTI-A")
-    multi_dir_b = os.path.join(MULTI_COLLECTION_DIR, "TLR-MULTI-B")
+    multi_dir_a = os.path.join(multi_collection_dir, "TLR-MULTI-A")
+    multi_dir_b = os.path.join(multi_collection_dir, "TLR-MULTI-B")
     os.makedirs(multi_dir_a, exist_ok=True)
     os.makedirs(multi_dir_b, exist_ok=True)
     for d, name in [(multi_dir_a, "TLR-MULTI-A"), (multi_dir_b, "TLR-MULTI-B")]:
@@ -124,12 +154,15 @@ def synthetic_fixtures():
 
     yield
 
-    shutil.rmtree(FIXTURES_COLLECTION_DIR, ignore_errors=True)
-    shutil.rmtree(MULTI_COLLECTION_DIR, ignore_errors=True)
-    if prior_env is None:
-        os.environ.pop("LOOP_RISK_GUI_ALLOWED_COLLECTIONS", None)
-    else:
-        os.environ["LOOP_RISK_GUI_ALLOWED_COLLECTIONS"] = prior_env
+    # Temp library auto-removed by tmp_path_factory; just restore the env seams.
+    for var, prior in (
+        ("LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT", prior_configs_root),
+        ("LOOP_RISK_GUI_ALLOWED_COLLECTIONS", prior_allowed),
+    ):
+        if prior is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = prior
 
 
 def _select_collection(at, collection_name):
