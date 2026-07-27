@@ -1,84 +1,65 @@
 #!/bin/bash
 # ===========================================================================
-# run_simulator_gui.command  --  Phase 4 bundle launcher (minimal)
+# run_simulator_gui.command  --  Phase 5 colleague-facing launcher (thin shell)
 #
-# Scope: establish the arm64 conda env from the bundle's pinned spec, build the
-# Swift .dylib on first run, wire the two runtime path seams (post_processing /
-# scenario_configs are vendored, not part of the pinned pip install), and
-# launch the app. The polished colleague-facing UX (Gatekeeper guidance,
-# auto-open browser, version-aware env recreate) is Phase 5, not here.
+# The double-clickable entry point. All non-trivial logic -- arm64-conda
+# discovery / bootstrap, version-aware env provisioning, the load-bearing
+# site-packages symlink seam, and the first-run Swift .dylib build -- lives in
+# the tested, stdlib-only launcher.py invoked below. This shell handles only the
+# pre-Python precondition (Xcode CLT, which must be checked before running
+# python3) and the final launch.
 #
-# Adapted from the Phase 0 spike launcher (data-science-simulator/spike/).
+# FIRST RUN (colleague notes -- see README):
+#   * Gatekeeper: the first time, right-click this file and choose "Open"
+#     (double-click alone is blocked because the bundle is not code-signed).
+#   * First run sets up the environment and builds components -- several
+#     minutes, with progress shown in this window. Later runs start quickly.
 # ===========================================================================
 set -eo pipefail
 
 bold() { printf "\033[1m%s\033[0m\n" "$1"; }
 info() { printf "  %s\n" "$1"; }
-die()  { printf "\033[31m[ERROR]\033[0m %s\n" "$1"; echo; read -r -p "Press Return to close."; exit 1; }
-
-echo
-bold "Tidepool Loop Risk Simulator GUI -- bundle launcher (arm64)"
-echo
+die()  { printf "\033[31m[ERROR]\033[0m %s\n" "$1"; echo; read -r -p "Press Return to close. "; exit 1; }
 
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_NAME="loop-risk-simulator-gui"
-ARM64_CONDA="$HOME/miniconda3/bin/conda"
-SWIFT_DIR="$BUNDLE_DIR/vendor/LoopAlgorithmToPython"
-DYLIB="$SWIFT_DIR/loop_to_python_api/libLoopAlgorithmToPython.dylib"
 
-[ -x "$ARM64_CONDA" ] || die "arm64 conda not found at $ARM64_CONDA. Install arm64 Miniconda first."
-
-# --- 1. arm64 conda (must match the arm64 .dylib) --------------------------
-bold "[1/4] arm64 conda"
-CONDA_BASE="$("$ARM64_CONDA" info --base)"
-CONDA_ARCH="$("$CONDA_BASE/bin/python" -c 'import platform; print(platform.machine())')"
-[ "$CONDA_ARCH" = "arm64" ] || die "conda at $ARM64_CONDA is $CONDA_ARCH, not arm64."
-info "conda base : $CONDA_BASE"
+echo
+bold "Tidepool Loop Risk Simulator GUI"
 echo
 
-# --- 2. Swift .dylib (built first run) -------------------------------------
-bold "[2/4] Swift native library"
-if [ -f "$DYLIB" ]; then
-    info ".dylib present -- skipping build."
-else
-    info ".dylib missing -- building from vendored source (first run)."
-    ( cd "$SWIFT_DIR" && ./build.sh ) || die "Swift build failed. Ensure Xcode CLT installed."
-    [ -f "$DYLIB" ] || die "build.sh ran but .dylib not at $DYLIB"
+# --- pre-Python precondition: Xcode Command Line Tools ---------------------
+# Needed for the Swift build, AND running /usr/bin/python3 without the tools can
+# pop a confusing install dialog -- so check here, before invoking Python.
+if ! xcode-select -p >/dev/null 2>&1; then
+    die "Xcode Command Line Tools are required but not installed. Open the Terminal app, run:  xcode-select --install  , complete the install, then open this launcher again."
 fi
-echo
 
-# --- 3. conda env from the bundle's pinned spec ----------------------------
-bold "[3/4] Conda environment: $ENV_NAME"
-if [ ! -d "$CONDA_BASE/envs/$ENV_NAME" ]; then
-    info "Creating environment (several minutes on first run)."
-    # env-file relative paths resolve against the yml's location, so run from
-    # the bundle dir so ./vendor/LoopAlgorithmToPython resolves.
-    ( cd "$BUNDLE_DIR" && "$ARM64_CONDA" env create -n "$ENV_NAME" -f "$BUNDLE_DIR/$ENV_NAME.yml" 2>/dev/null \
-      || "$ARM64_CONDA" env create -n "$ENV_NAME" -f "$BUNDLE_DIR/conda-environment.yml" ) \
-      || die "conda env create failed -- see solver output above."
-else
-    info "Environment exists -- reusing."
+# --- find a python3 to run the launcher helper -----------------------------
+PYTHON3="/usr/bin/python3"
+if [ ! -x "$PYTHON3" ]; then
+    PYTHON3="$(command -v python3 || true)"
 fi
-ENV_PYTHON="$CONDA_BASE/envs/$ENV_NAME/bin/python"
-[ -x "$ENV_PYTHON" ] || die "Env python not found at $ENV_PYTHON."
-echo
+[ -n "$PYTHON3" ] || die "No python3 was found to start the launcher. Install the Xcode Command Line Tools:  xcode-select --install"
 
-# --- 4. place vendored orphan paths beside the installed package -----------
-# The pinned pip install does NOT carry post_processing/severity_model.py or
-# scenario_configs/. gui_runner imports `severity_model`, and ScenarioParserV2
-# resolves `reusable.*` pointers from a path hardcoded relative to its own module
-# (<package>/../../scenario_configs/tidepool_risk_v2) -- NOT from any env var. So
-# both must sit beside the installed package. Symlink the vendored copies into
-# site-packages so every native resolution (gui_runner import, streamlit_app
-# LIBRARY_ROOT, and the parser's pointer dir) finds them.
-bold "[4/5] Wire vendored simulator paths"
-SITE_PACKAGES="$("$ENV_PYTHON" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-ln -sfn "$BUNDLE_DIR/vendor/sim/scenario_configs" "$SITE_PACKAGES/scenario_configs"
-ln -sfn "$BUNDLE_DIR/vendor/sim/post_processing/severity_model.py" "$SITE_PACKAGES/severity_model.py"
-info "Linked scenario_configs + severity_model into $SITE_PACKAGES"
+# --- provision (first run builds everything; later runs reuse) -------------
+# launcher.py streams progress to this window (stderr) and prints ONLY the env
+# python path to stdout, which we capture. It exits non-zero with a plain
+# message on any failure.
+info "Preparing to launch (the first run sets things up and can take several minutes)..."
 echo
+if ! ENV_PYTHON="$("$PYTHON3" "$BUNDLE_DIR/launcher.py" provision --bundle-dir "$BUNDLE_DIR")"; then
+    echo
+    die "Setup did not complete. See the messages above."
+fi
+[ -x "$ENV_PYTHON" ] || die "The launcher did not return a usable environment (got: '$ENV_PYTHON')."
 
-# --- 5. launch -------------------------------------------------------------
-bold "[5/5] Launch"
-info "Starting Streamlit. Press Ctrl-C in this window to stop."
+# --- launch ----------------------------------------------------------------
+echo
+bold "Starting the app..."
+info "A browser tab will open automatically. Keep this window open while you work."
+info "To stop: press Ctrl-C here, or simply close this window."
+echo
+trap 'echo; echo "Shutting down..."; exit 0' INT TERM
+# Streamlit opens the browser itself (config.toml does not set headless) and
+# runs in the foreground; Ctrl-C or closing the window stops it.
 ( cd "$BUNDLE_DIR" && "$ENV_PYTHON" -m streamlit run "$BUNDLE_DIR/streamlit_app.py" )

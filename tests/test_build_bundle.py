@@ -116,6 +116,38 @@ def test_publish_command_shape():
     assert "--repo tidepool-org/loop-risk-simulator-gui" in cmd
 
 
+# --- vendor_swift strips the (stale) committed .dylib ----------------------
+
+def test_strip_prebuilt_dylibs_removes_only_dylibs(tmp_path):
+    (tmp_path / "loop_to_python_api").mkdir()
+    dylib = tmp_path / "loop_to_python_api" / "libLoopAlgorithmToPython.dylib"
+    dylib.write_text("stale-binary")
+    src = tmp_path / "loop_to_python_api" / "api.py"
+    src.write_text("# api")
+
+    removed = build_bundle._strip_prebuilt_dylibs(str(tmp_path))
+
+    assert str(dylib) in removed
+    assert not dylib.exists()          # the pre-built binary is gone
+    assert src.exists()                # source is untouched
+
+
+def test_vendor_swift_strips_committed_dylib(tmp_path, monkeypatch):
+    dest = tmp_path / "swift"
+
+    def fake_extract(repo, ref, paths, d):
+        api = os.path.join(d, "loop_to_python_api")
+        os.makedirs(api, exist_ok=True)
+        open(os.path.join(d, "build.sh"), "w").close()
+        open(os.path.join(api, "libLoopAlgorithmToPython.dylib"), "w").close()
+
+    monkeypatch.setattr(build_bundle, "extract_tree_paths", fake_extract)
+    build_bundle.vendor_swift("/fake/swift", "HEAD", str(dest))
+
+    assert os.path.isfile(dest / "build.sh")  # source kept
+    assert not os.path.exists(dest / "loop_to_python_api" / "libLoopAlgorithmToPython.dylib")
+
+
 # --- full assembly with the git boundary mocked ----------------------------
 
 def test_build_bundle_assembles_expected_tree(tmp_path, monkeypatch):
@@ -129,6 +161,7 @@ def test_build_bundle_assembles_expected_tree(tmp_path, monkeypatch):
     (app / "README.md").write_text("# readme")
     (app / "conda-environment.yml").write_text(_SOURCE_ENV)
     (app / "packaging" / "templates" / "run_simulator_gui.command").write_text("#!/bin/bash\n")
+    (app / "packaging" / "launcher.py").write_text("# launcher helper\n")
 
     # Mock the git boundary: resolve_ref returns a fake SHA; extract_tree_paths
     # drops a marker file so we can assert vendoring happened.
@@ -164,6 +197,7 @@ def test_build_bundle_assembles_expected_tree(tmp_path, monkeypatch):
     assert "./streamlit_app.py" in names
     assert "./conda-environment.yml" in names
     assert "./run_simulator_gui.command" in names
+    assert "./launcher.py" in names
     assert "./BUNDLE_VERSION.json" in names
     assert "./vendor/sim/_sim_extracted" in names
     assert "./vendor/LoopAlgorithmToPython/_swift_extracted" in names

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import glob
 import json
 import os
 import shutil
@@ -162,13 +163,31 @@ def stage_app_code(app_repo: str, dest: str, artifacts: List[str]) -> None:
             shutil.copy2(src, target)
 
 
+def _strip_prebuilt_dylibs(root: str) -> List[str]:
+    """Remove every ``*.dylib`` under ``root``; return the removed paths (sorted).
+
+    Enforces the "no pre-built binary in the bundle" contract regardless of what
+    is committed in the Swift repo at the vendored ref.
+    """
+    removed = sorted(glob.glob(os.path.join(root, "**", "*.dylib"), recursive=True))
+    for path in removed:
+        os.remove(path)
+    return removed
+
+
 def vendor_swift(swift_repo: str, swift_ref: str, dest: str) -> None:
     """Vendor LoopAlgorithmToPython source at `swift_ref` into `dest`.
 
-    Source only -- the .dylib is built on first run by the launcher, per the
-    settled small-asset / heavy-first-run tradeoff (no pre-built binary here).
+    Source only -- the launcher builds the .dylib on first run (the settled
+    small-asset / heavy-first-run tradeoff). `git archive` carries whatever is
+    committed at `swift_ref`, which has historically INCLUDED a stale committed
+    .dylib, so any pre-built binary is stripped after extraction. Trusting the
+    committed one shipped a 2024 build missing a symbol the current api.py calls
+    (getLoopRecommendations -> runtime dlsym failure); stripping it guarantees the
+    launcher always builds a fresh, matching library.
     """
     extract_tree_paths(swift_repo, swift_ref, ["."], dest)
+    _strip_prebuilt_dylibs(dest)
 
 
 def write_version_stamp(dest: str, stamp: dict) -> None:
@@ -237,11 +256,17 @@ def build_bundle(
         # 4. Vendored Swift source (built to .dylib on first run).
         vendor_swift(swift_repo, swift_ref, os.path.join(staging, "vendor", "LoopAlgorithmToPython"))
 
-        # 5. Launcher.
+        # 5. Launcher: the thin .command entry point + its stdlib-only helper.
+        # Both are staged from packaging/ -- the .command is only a shell over
+        # launcher.py, which owns the real provisioning logic (single source).
         launcher_src = os.path.join(app_repo, "packaging", "templates", "run_simulator_gui.command")
         launcher_dst = os.path.join(staging, "run_simulator_gui.command")
         shutil.copy2(launcher_src, launcher_dst)
         os.chmod(launcher_dst, 0o755)
+        helper_src = os.path.join(app_repo, "packaging", "launcher.py")
+        if not os.path.isfile(helper_src):
+            raise FileNotFoundError(f"Launcher helper missing: {helper_src}")
+        shutil.copy2(helper_src, os.path.join(staging, "launcher.py"))
 
         # 6. Provenance stamp.
         stamp = {
