@@ -34,7 +34,7 @@ pytestmark = pytest.mark.skipif(
     reason="Set LOOP_RISK_GUI_BUNDLE_DIR (extracted bundle) to run the Phase 4 bundle-boundary test.",
 )
 
-EXPECTED_SIMULATOR_REF = "gui-bundle-v0.1.0"
+EXPECTED_SIMULATOR_REF = "main"
 REAL_COLLECTION = "test"
 REAL_DIR_NAME = "TLR-QAE-482-test"
 

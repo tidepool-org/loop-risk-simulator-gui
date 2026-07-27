@@ -208,11 +208,12 @@ def test_happy_path_all_three_stages_reach_the_gui_intact():
     for stage_result in assessment.stages.values():
         assert stage_result.n_sims is not None  # the silent-drop-detection hook is populated
 
-    # TWI-0006 constraint: both pre and no_loop reach the GUI and are selectable --
-    # never auto-collapsed to one pre-mitigation figure.
-    premit_selectbox = [sb for sb in at.selectbox if "pre-mitigation" in sb.label.lower()][0]
-    assert set(premit_selectbox.options) == {"Pre-mitigation", "No Loop"}
-    assert premit_selectbox.value is None
+    # TWI-0006 constraint: both pre and no_loop reach the GUI intact -- never
+    # auto-collapsed to one pre-mitigation figure. The "which phase" selectbox
+    # that used to expose this was removed in TRSET-2 (it was inert), so the
+    # guarantee is now checked on the rendered stage table instead.
+    stage_labels = set(at.dataframe[0].value["Stage"])
+    assert {"Pre-mitigation", "No Loop"} <= stage_labels
 
 
 # ---------------------------------------------------------------------------

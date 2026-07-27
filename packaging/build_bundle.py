@@ -27,7 +27,7 @@ command for a maintainer to run (an outward, irreversible action).
 Usage:
     python packaging/build_bundle.py build \\
         --version 0.1.0 \\
-        --simulator-ref gui-bundle-v0.1.0 \\
+        --simulator-ref main \\
         --simulator-repo ../data-science-simulator \\
         --swift-repo ../LoopAlgorithmToPython \\
         --output-dir dist/
@@ -272,7 +272,7 @@ def main(argv: List[str] | None = None) -> int:
 
     b = sub.add_parser("build", help="Build the versioned bundle archive.")
     b.add_argument("--version", required=True, help="Bundle version, e.g. 0.1.0")
-    b.add_argument("--simulator-ref", default="gui-bundle-v0.1.0", help="Pinned data-science-simulator git ref.")
+    b.add_argument("--simulator-ref", default="main", help="data-science-simulator git ref to build against (default: main; the build still records the resolved SHA in the version stamp).")
     b.add_argument("--simulator-repo", default="../data-science-simulator", help="Local data-science-simulator checkout.")
     b.add_argument("--swift-repo", default="../LoopAlgorithmToPython", help="Local LoopAlgorithmToPython checkout.")
     b.add_argument("--swift-ref", default="HEAD", help="LoopAlgorithmToPython git ref to vendor.")

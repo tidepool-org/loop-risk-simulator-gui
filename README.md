@@ -11,8 +11,10 @@ repo as the sanctioned in-process service layer.
 The simulator is consumed as a **pinned git ref**, not an editable sibling
 checkout — the two repos no longer need to be cloned side by side.
 `conda-environment.yml` installs
-`git+https://github.com/tidepool-org/data-science-simulator@gui-bundle-v0.1.0`
-and is the single source of truth for the pins.
+`git+https://github.com/tidepool-org/data-science-simulator@main`
+and is the single source of truth for the pins. The simulator is tracked on
+`main` (not a fixed tag) because this GUI is an exploration wrapper only —
+updates flow in on the next env rebuild with no re-tag or re-pin.
 
 Two simulator paths — `post_processing/severity_model.py` and
 `scenario_configs/` — are **not** part of the installed package. `gui_runner`
@@ -51,7 +53,7 @@ then publish it as a GitHub Release asset:
 ```bash
 python packaging/build_bundle.py build \
   --version 0.1.0 \
-  --simulator-ref gui-bundle-v0.1.0 \
+  --simulator-ref main \
   --simulator-repo ../data-science-simulator \
   --swift-repo ../LoopAlgorithmToPython \
   --output-dir dist/
