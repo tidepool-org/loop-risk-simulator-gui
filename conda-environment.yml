@@ -52,12 +52,17 @@ dependencies:
     - git+https://github.com/tidepool-org/data-science-models@sf/incorporate_pa
     - git+https://github.com/tidepool-org/Pyloopkit
     - git+https://github.com/tidepool-org/data-science-metrics
-    # The simulator itself, PINNED (Phase 4 migration). post_processing/ and
+    # The simulator itself. Tracks `main` intentionally (NOT a fixed tag): this
+    # GUI is an exploration wrapper only -- official risk assessment runs through
+    # the simulator directly, and traceability there comes from run timestamps,
+    # not from a reproducible GUI build. Tracking main means simulator updates
+    # flow in on the next env (re)build with no re-tag / re-pin. Do not "fix"
+    # this back to a version tag without that context. post_processing/ and
     # scenario_configs/ do NOT ship with this install (not part of the package);
-    # the packaged bundle vendors them from this same tag. For a dev checkout,
+    # the packaged bundle vendors them from this same ref. For a dev checkout,
     # point LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT / LOOP_RISK_GUI_POST_PROCESSING_DIR
     # at a simulator checkout, or use the editable rollback above.
-    - git+https://github.com/tidepool-org/data-science-simulator@gui-bundle-v0.1.0
+    - git+https://github.com/tidepool-org/data-science-simulator@main
     # Swift binding: editable sibling for dev; the bundle swaps this for its
     # vendored copy (./vendor/LoopAlgorithmToPython).
     - -e ../LoopAlgorithmToPython
