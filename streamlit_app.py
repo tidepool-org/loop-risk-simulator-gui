@@ -134,6 +134,8 @@ def _render_stage_table(assessment):
             "Severity": stage_result.severity,
             "TIR %": stage_result.tir,
             "TBR %": stage_result.tbr,
+            "LBGI": stage_result.lbgi_value_avg,
+            "DKAI": stage_result.dka_index_value_avg,
             "TAR %": stage_result.tar,
             "N sims": stage_result.n_sims,
         })

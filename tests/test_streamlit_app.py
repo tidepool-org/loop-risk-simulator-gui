@@ -25,6 +25,7 @@ def _make_fake_assessment():
     stage = StageResult(
         stage="pre", harm_type="Hypoglycemia", severity="3", tir="70.0", tbr="10.0", tar="5.0",
         lbgi_score_avg=3, dka_score_avg=1, hyperglycemia_score=0, n_sims=4,
+        lbgi_value_avg="2.5", dka_index_value_avg="21.91",
     )
     return SeverityAssessment(
         simulation_id="TLR-TEST", subdirectory_name="TLR-TEST", timestamp="2026-07-21T00:00:00",
@@ -67,6 +68,17 @@ def test_happy_path_result_renders_table_and_ungated_premit_choice():
     assert not at.exception
     assert [e.label for e in at.expander] == ["TLR-TEST"]
     assert len(at.dataframe) == 1
+
+    # LBGI/DKAI surface as their own columns, positioned between TBR % and TAR %
+    # (mirroring the RTF table order), carrying the truncated raw-index strings.
+    stage_df = at.dataframe[0].value
+    cols = list(stage_df.columns)
+    assert "LBGI" in cols and "DKAI" in cols
+    assert cols.index("LBGI") == cols.index("TBR %") + 1
+    assert cols.index("DKAI") == cols.index("TAR %") - 1
+    assert stage_df["LBGI"].iloc[0] == "2.5"
+    assert stage_df["DKAI"].iloc[0] == "21.91"
+
     premit_selectbox = [sb for sb in at.selectbox if "pre-mitigation" in sb.label.lower()][0]
     # TWI-0006 constraint: never auto-collapse to a single pre-mitigation figure --
     # the choice must start unselected, not defaulted to 'Pre-mitigation'.
