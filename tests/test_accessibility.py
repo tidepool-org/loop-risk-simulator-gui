@@ -187,6 +187,41 @@ def test_primary_color_on_white_is_a_documented_known_finding_not_a_gate():
     )
 
 
+def test_disclaimer_banner_contrast_meets_normal_text_contrast():
+    # TRSET-5: the disclaimer caution box's foreground/background pair is added to
+    # the contrast gate and must clear the 4.5:1 normal-text minimum.
+    fg = streamlit_app._DISCLAIMER_BANNER_FG
+    bg = streamlit_app._DISCLAIMER_BANNER_BG
+    ratio = contrast_ratio(fg, bg)
+    assert ratio >= NORMAL_TEXT_MIN, (
+        f"disclaimer banner text {fg} on {bg} is {ratio:.2f}:1, "
+        f"below the {NORMAL_TEXT_MIN}:1 normal-text minimum"
+    )
+    # The known sub-threshold brand pair (#627CFF on white ~3.6:1) must not be used.
+    assert "#627CFF" not in (fg.upper(), bg.upper())
+
+
+def test_disclaimer_banner_reuses_existing_palette_tokens():
+    # TRSET-5 constraint: no new brand colors. The banner background is the theme's
+    # secondaryBackgroundColor and its text is the existing _BRAND_CSS override
+    # color -- so the pair is already part of the app's palette, not invented here.
+    theme = _theme_tokens()
+    assert streamlit_app._DISCLAIMER_BANNER_BG.upper() == theme["secondaryBackgroundColor"].upper()
+    assert streamlit_app._DISCLAIMER_BANNER_FG.upper() == _css_override_text_color().upper()
+
+
+def test_disclaimer_banner_not_conveyed_by_color_alone():
+    # WCAG 1.3: the disclaimer's meaning is carried by an alert semantic and the
+    # explicit "not medical software" / "must not" wording, not color alone.
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.run()
+    assert not at.exception
+    banners = [m for m in at.markdown if 'role="alert"' in m.value]
+    assert len(banners) == 1, "expected exactly one role=alert disclaimer banner"
+    value = banners[0].value.lower()
+    assert "not medical software" in value and "must not" in value
+
+
 # ---------------------------------------------------------------------------
 # WCAG 2.1 (Keyboard) + 1.3 (Adaptable) -- rendered smoke
 # ---------------------------------------------------------------------------
