@@ -49,6 +49,24 @@ LOGO_SCALE = 1.5
 LOGO_WIDTH_PX = round(LOGO_BASELINE_WIDTH_PX * LOGO_SCALE)  # 240
 LOGO_ALT_TEXT = "Tidepool logo"
 
+# Regulatory disclaimer banner (TRSET-5). Verbatim, non-clinical-status text,
+# defined once (DRY) and rendered as a custom caution box at the top of the
+# main page. Colors reuse the existing Tidepool palette -- no new brand colors:
+# the box background is the theme's secondaryBackgroundColor (#281946) and the
+# text is the same #F5F5FA the _BRAND_CSS input-value override already uses, a
+# pair the TRSET-4 contrast gate already clears (~14.7:1 >> 4.5:1). Styling is
+# inline on the element (not folded into _BRAND_CSS) so the TRSET-4
+# _css_override_text_color() invariant -- exactly one color override in
+# _BRAND_CSS -- is preserved.
+DISCLAIMER_TEXT = (
+    "The Tidepool Risk Severity Evaluation Tool is not medical software. "
+    "It is intended only for risk exploration and must not be used to make "
+    "insulin dosing decisions."
+)
+_DISCLAIMER_BANNER_BG = "#281946"  # == config.toml theme secondaryBackgroundColor
+_DISCLAIMER_BANNER_FG = "#F5F5FA"  # == the _BRAND_CSS input-value override color
+_DISCLAIMER_WARNING_ICON = "⚠"  # ⚠ -- carries the warning independent of color
+
 # Interim allowlist restricting the selector to the two collections in active
 # use. Remove once the library gains a first-class notion of "active" vs
 # "archived" collections.
@@ -287,6 +305,25 @@ _BRAND_CSS = """
 """
 
 
+def _render_disclaimer_banner():
+    """Render the persistent regulatory disclaimer as a caution box at page top.
+
+    A custom-styled ``role="alert"`` box (not ``st.warning``, so assertions keyed
+    on ``at.warning`` are unaffected). The meaning is carried by text and the ⚠
+    glyph, not color alone (WCAG 1.3); the icon is ``aria-hidden`` since the
+    alert text already conveys it. Inline styles only -- no positive tabindex,
+    no keyboard trap (WCAG 2.1).
+    """
+    st.markdown(
+        f'<div role="alert" style="background-color: {_DISCLAIMER_BANNER_BG}; '
+        f'color: {_DISCLAIMER_BANNER_FG}; padding: 0.75rem 1rem; '
+        f'border-radius: 0.5rem; margin-bottom: 1rem;">'
+        f'<span aria-hidden="true">{_DISCLAIMER_WARNING_ICON}</span> '
+        f'{DISCLAIMER_TEXT}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def _render_logo():
     # HTML <img> (not st.logo/st.image) so we can set an explicit numeric width
     # and alt-text, neither of which st.logo exposes (TRSET-3). The asset is
@@ -305,6 +342,7 @@ def _render_logo():
 def main():
     st.set_page_config(page_title="Tidepool Loop Risk Severity Estimation Tool", layout="wide")
     st.markdown(_BRAND_CSS, unsafe_allow_html=True)
+    _render_disclaimer_banner()
     if os.path.exists(LOGO_PATH):
         _render_logo()
     _init_session_state()

@@ -185,6 +185,59 @@ def test_integration_full_app_run_renders_header_and_logo():
     )
 
 
+def _banner_markdowns(at):
+    # The disclaimer is the app's only role="alert" markdown box.
+    return [m for m in at.markdown if 'role="alert"' in m.value]
+
+
+def test_disclaimer_banner_renders_above_logo_with_exact_text():
+    # TRSET-5 Feature integration test: full AppTest run against the REAL config
+    # library (mirroring test_integration_full_app_run_renders_header_and_logo),
+    # asserting the disclaimer banner renders once, with the exact verbatim text,
+    # at the top of the page -- above the logo <img>.
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.run()
+    assert not at.exception
+
+    banners = _banner_markdowns(at)
+    assert len(banners) == 1, "expected exactly one disclaimer alert banner"
+    banner = banners[0]
+
+    # Exact wording is pinned here as a literal (the spec), independent of the
+    # app's DISCLAIMER_TEXT constant, so a change to that constant is caught.
+    exact_text = (
+        "The Tidepool Risk Severity Evaluation Tool is not medical software. "
+        "It is intended only for risk exploration and must not be used to make "
+        "insulin dosing decisions."
+    )
+    assert exact_text in banner.value
+    assert "⚠" in banner.value
+
+    # Top-of-page ordering: the banner precedes the logo <img> in render order.
+    markdown_values = [m.value for m in at.markdown]
+    banner_idx = markdown_values.index(banner.value)
+    logo_idx = next(i for i, v in enumerate(markdown_values) if "<img" in v)
+    assert banner_idx < logo_idx, "disclaimer banner must render above the logo"
+
+
+def test_disclaimer_banner_does_not_collide_with_st_warning():
+    # The banner is a custom role="alert" markdown box, NOT st.warning -- so a
+    # no-data run still surfaces exactly its own warning and the banner text does
+    # not leak into at.warning (guards the TRSET-3 at.warning assertions).
+    fake_result = RunResult(
+        save_dir="/tmp/fake",
+        risk_dir_results=[RiskDirRunResult("TLR-EMPTY", None, [])],
+        cancelled=False,
+    )
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.session_state["run_result"] = fake_result
+    at.run()
+
+    assert not at.exception
+    assert len(_banner_markdowns(at)) == 1
+    assert not any("not medical software" in w.value.lower() for w in at.warning)
+
+
 def test_cancelled_run_renders_cancellation_warning():
     fake_result = RunResult(
         save_dir="/tmp/fake",

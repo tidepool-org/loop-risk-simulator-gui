@@ -150,3 +150,36 @@ pass/fail gate per adjudication (brand color; remediation is a separate ticket);
 one test documents the known value and flags loudly only if it shifts out of
 band. Regression risk for this change is Low (additive, GUI-repo test layer;
 no simulator or `gui_runner` change), so no rollback note applies.
+
+## Disclaimer banner (TRSET-5)
+
+**What changed (≤100 words):** Added a persistent regulatory disclaimer at the
+top of the main page — a custom-styled `role="alert"` caution box (rendered via
+`st.markdown(..., unsafe_allow_html=True)`, above the logo/header on every load)
+stating the tool is not medical software and must not drive insulin dosing
+decisions. The wording lives in a single `DISCLAIMER_TEXT` constant. Colors
+reuse the existing Tidepool palette — no new brand colors: background is the
+theme's `secondaryBackgroundColor` (`#281946`), text is the `_BRAND_CSS`
+override color (`#F5F5FA`). Styling is inline on the element, leaving `_BRAND_CSS`
+untouched. It is a distinct box, not `st.warning`.
+
+Example:
+
+```bash
+streamlit run streamlit_app.py     # banner shows at the top of the page
+```
+
+**Validation (≤100 words):** Extends the existing `AppTest.from_file` harness —
+no browser/Playwright/Selenium. `test_streamlit_app.py` adds a full-run
+integration test asserting the banner renders once with the exact verbatim text,
+carries the ⚠ icon and `role="alert"`, and precedes the logo `<img>`; plus a
+guard that it does not collide with `at.warning`. `test_accessibility.py` adds
+the banner's `#F5F5FA`-on-`#281946` pair to the contrast gate (~14.7:1 ≥ 4.5:1),
+asserts it reuses existing palette tokens (never `#627CFF`), and checks the alert
+is conveyed by text + semantics, not color alone. Full suite green (22 tests).
+
+**Cautions / limitations:** Presentation layer only — no change to `gui_runner`,
+the Loop algorithm interface, the scenario-config schema, or RTF output. Banner
+is on the main page only, not exported artifacts. Regression risk Low–Medium
+(shares the render path and interacts with the TRSET-4 contrast gate, but reuses
+already-gated tokens); not a breaking change, so no rollback note applies.
