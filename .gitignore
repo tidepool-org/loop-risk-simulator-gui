@@ -15,6 +15,11 @@ PHI-*
 
 *.log
 
+# Simulator run artifacts written into the working tree during test/app runs
+# (e.g. by the Phase-3 integration suite). Never belong in version control.
+loop_algo_input_*.json
+loop_algo_output_*.json
+
 # Streamlit local config/secrets (branding config, once added, is tracked deliberately)
 .streamlit/secrets.toml
 
