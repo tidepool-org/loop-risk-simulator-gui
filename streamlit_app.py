@@ -90,6 +90,36 @@ def _list_tlr_dirs(collection_dir):
     )
 
 
+def _plot_caption(png_path, risk_dir_name):
+    """Best-effort VP-profile label for a result plot, read back from its filename.
+
+    gui_runner names each figure "{risk_dir_name}_{scenario_json_name}_{ts}.png",
+    where scenario_json_name is the profile's config file, e.g.
+    "Simulation-Configuration-TLR-909_02_05_adolescent_profile_v1.json". The
+    profile token is the segment before "_profile". This is presentation-only --
+    the profile identity is already in the name, so we read it here rather than
+    changing anything the simulator writes. Returns None if the name doesn't
+    match the expected shape, so the image still renders (just without a caption).
+    """
+    stem = os.path.basename(png_path)
+    if stem.lower().endswith(".png"):
+        stem = stem[:-4]
+    marker = "Simulation-Configuration-"
+    start = stem.find(marker)
+    if start == -1:
+        return None
+    scenario = stem[start + len(marker):].split(".json")[0]
+    if scenario.startswith(risk_dir_name + "_"):
+        scenario = scenario[len(risk_dir_name) + 1:]
+    cut = scenario.lower().find("_profile")
+    if cut <= 0:
+        return None
+    profile = scenario[:cut].replace("_", " ").strip()
+    if not profile:
+        return None
+    return f"{profile.capitalize()} profile"
+
+
 def _init_session_state():
     defaults = {
         "cancel_event": None,
@@ -167,16 +197,6 @@ def _render_risk_dir_result(result):
         st.caption(f"{assessment.profile_count} profile(s) · timestamp {assessment.timestamp}")
         _render_stage_table(assessment)
 
-        st.selectbox(
-            "Which stage is the applicable pre-mitigation figure for this report? "
-            "(TWI-0006 §2.g.ii.1: normally 'Pre-mitigation', but 'No Loop' "
-            "if Loop wasn't automating during that period)",
-            options=["Pre-mitigation", "No Loop"],
-            index=None,
-            placeholder="Select one -- required before reporting a pre-mitigation figure",
-            key=f"premit_choice_{result.risk_dir_name}",
-        )
-
         if assessment.catastrophic_findings:
             st.markdown("**Catastrophic findings (severity 4→5):**")
             st.dataframe(
@@ -195,7 +215,7 @@ def _render_risk_dir_result(result):
 
         for png_path in result.png_paths:
             if os.path.exists(png_path):
-                st.image(png_path)
+                st.image(png_path, caption=_plot_caption(png_path, result.risk_dir_name))
 
 
 @st.fragment(run_every=1)
@@ -283,12 +303,16 @@ def _render_logo():
 
 
 def main():
-    st.set_page_config(page_title="Tidepool Loop Risk Assessment", layout="wide")
+    st.set_page_config(page_title="Tidepool Loop Risk Severity Estimation Tool", layout="wide")
     st.markdown(_BRAND_CSS, unsafe_allow_html=True)
     if os.path.exists(LOGO_PATH):
         _render_logo()
     _init_session_state()
-    st.title("Tidepool Loop Risk Assessment")
+    st.title("Tidepool Loop Risk Severity Estimation Tool")
+    st.markdown(
+        "Estimates the clinical risk severity of Tidepool Loop across a library of "
+        "virtual-patient scenarios, summarizing the glycemic and DKA risk metrics for each."
+    )
 
     collections = _list_collections()
     if not collections:
@@ -320,7 +344,7 @@ def main():
 
     run_in_progress = st.session_state.run_thread is not None and st.session_state.run_thread.is_alive()
 
-    if st.button("Run assessment", disabled=bool(validation_result.errors_by_file) or run_in_progress):
+    if st.button("Run Tool", disabled=bool(validation_result.errors_by_file) or run_in_progress):
         _start_run(config_dir, target_risk_dir)
         st.rerun()
 
