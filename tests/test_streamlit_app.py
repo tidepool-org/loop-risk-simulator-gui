@@ -42,6 +42,35 @@ def test_app_loads_and_lists_real_collections():
     assert len(collection_selectbox.options) > 0
 
 
+def test_logo_renders_with_numeric_width_and_alt_text():
+    # TRSET-3: the logo moved off st.logo (no numeric size / no alt) to an
+    # explicitly-sized HTML <img>. Guard the width (1.5x baseline = 240px) and
+    # the exact alt-text against regressions. AppTest sees the element tree, not
+    # pixels, so we assert on the rendered <img> markup.
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.run()
+    assert not at.exception
+    logo_imgs = [m for m in at.markdown if "<img" in m.value and 'alt="Tidepool logo"' in m.value]
+    assert len(logo_imgs) == 1
+    assert 'width="240"' in logo_imgs[0].value
+
+
+def test_brand_css_restores_material_icon_font():
+    # TRSET-3: the DM Sans `!important` rule was clobbering Streamlit's Material
+    # icon font, so expander toggle glyphs rendered as the literal ligature text
+    # "keyboard_arrow_down" and overlapped the header label. Guard the override
+    # that restores the icon font.
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.run()
+    assert not at.exception
+    css_blocks = [
+        m.value for m in at.markdown
+        if '[data-testid="stIconMaterial"]' in m.value
+    ]
+    assert len(css_blocks) == 1
+    assert "Material Symbols Rounded" in css_blocks[0]
+
+
 def test_single_directory_scope_populates_tlr_selectbox():
     at = AppTest.from_file("streamlit_app.py", default_timeout=30)
     at.run()
@@ -98,6 +127,32 @@ def test_no_usable_data_renders_warning_not_crash():
     assert not at.exception
     assert len(at.warning) >= 1
     assert any("no usable data" in w.value.lower() for w in at.warning)
+
+
+def test_integration_full_app_run_renders_header_and_logo():
+    # TRSET-3 Feature requirement: end-to-end via AppTest against the real
+    # config library, asserting the header surface (title + collections) and the
+    # reworked logo both render correctly in a single full app run -- not with a
+    # mocked result, but the real import-time library listing exercised.
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.run()
+    assert not at.exception
+
+    # Header: title present and the real library populated the collection selector.
+    assert any(t.value == "Tidepool Loop Risk Assessment" for t in at.title)
+    collection_selectbox = [sb for sb in at.selectbox if sb.label == "Config collection"][0]
+    assert len(collection_selectbox.options) > 0
+
+    # Logo: explicitly-sized HTML <img> with 1.5x-baseline width and exact alt-text.
+    logo_imgs = [m for m in at.markdown if "<img" in m.value and 'alt="Tidepool logo"' in m.value]
+    assert len(logo_imgs) == 1
+    assert 'width="240"' in logo_imgs[0].value
+
+    # Header overlap guard: the icon-font override ships in the full run.
+    assert any(
+        '[data-testid="stIconMaterial"]' in m.value and "Material Symbols Rounded" in m.value
+        for m in at.markdown
+    )
 
 
 def test_cancelled_run_renders_cancellation_warning():

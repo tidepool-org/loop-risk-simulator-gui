@@ -9,6 +9,7 @@ constraint (design doc, 2026-07-21) that keeps the door open for a future
 temp directory with no changes required there.
 """
 
+import base64
 import os
 import threading
 
@@ -36,6 +37,17 @@ if _scenario_configs_root:
 else:
     LIBRARY_ROOT = os.path.join(PROJECT_ROOT_DIR, "scenario_configs", "tidepool_risk_v2", "loop_risk_v2_0")
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Tidepool_Logo_Light_Large_3000.jpg")
+
+# Logo sizing. We render an explicitly-sized HTML <img> rather than st.logo
+# because st.logo exposes neither a numeric width nor alt-text (TRSET-3).
+# Baseline is the width st.logo(size="large") rendered at (160px, measured in a
+# running app); TRSET-3 asks for 1.5x that. Width is the only dimension set --
+# the asset's native 3000x600 (5:1) aspect ratio then fixes the height (48px),
+# so this stays DRY and there is no second magic number to keep in sync.
+LOGO_BASELINE_WIDTH_PX = 160
+LOGO_SCALE = 1.5
+LOGO_WIDTH_PX = round(LOGO_BASELINE_WIDTH_PX * LOGO_SCALE)  # 240
+LOGO_ALT_TEXT = "Tidepool logo"
 
 # Interim allowlist restricting the selector to the two collections in active
 # use. Remove once the library gains a first-class notion of "active" vs
@@ -226,6 +238,16 @@ _BRAND_CSS = """
     font-family: 'DM Sans', sans-serif !important;
 }
 
+/* ...but that universal !important also clobbers the Material icon font on
+   Streamlit's glyph spans (e.g. the expander toggle), so the ligature text
+   "keyboard_arrow_down" renders literally and overflows onto the label -- the
+   TRSET-3 results-header overlap. Restore the icon font on those spans. The
+   .stApp descendant selector (0,2,0) outweighs .stApp * (0,1,0), so this wins
+   regardless of source order. */
+.stApp [data-testid="stIconMaterial"] {
+    font-family: 'Material Symbols Rounded' !important;
+}
+
 /* Their label stays on the page background and must keep the default dark
    text, so only the value box (input/select + its role="group" wrapper)
    gets the light override, not the whole widget. */
@@ -245,11 +267,26 @@ _BRAND_CSS = """
 """
 
 
+def _render_logo():
+    # HTML <img> (not st.logo/st.image) so we can set an explicit numeric width
+    # and alt-text, neither of which st.logo exposes (TRSET-3). The asset is
+    # embedded as a data URI so a single markdown call is fully self-contained
+    # (no static-file-serving config); width is fixed, height follows the
+    # native aspect ratio.
+    with open(LOGO_PATH, "rb") as fh:
+        encoded = base64.b64encode(fh.read()).decode("ascii")
+    st.markdown(
+        f'<img src="data:image/jpeg;base64,{encoded}" '
+        f'width="{LOGO_WIDTH_PX}" alt="{LOGO_ALT_TEXT}">',
+        unsafe_allow_html=True,
+    )
+
+
 def main():
     st.set_page_config(page_title="Tidepool Loop Risk Assessment", layout="wide")
     st.markdown(_BRAND_CSS, unsafe_allow_html=True)
     if os.path.exists(LOGO_PATH):
-        st.logo(LOGO_PATH, size="large")
+        _render_logo()
     _init_session_state()
     st.title("Tidepool Loop Risk Assessment")
 
