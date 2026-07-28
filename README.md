@@ -118,3 +118,35 @@ set `LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT` / `LOOP_RISK_GUI_POST_PROCESSING_DIR`.
 `data-science-simulator` line in `conda-environment.yml` back to
 `- -e ../data-science-simulator`, re-clone the two repos as siblings, and
 recreate the env. That restores the exact Phase-3 editable-sibling behavior.
+
+## Accessibility tests (TRSET-4)
+
+`tests/test_accessibility.py` adds a regression-guarding layer for three basic
+WCAG requirements against the app's own tokens and emitted markup — no browser,
+Playwright, Selenium, or axe-core:
+
+- **1.4.3 Contrast (unit):** a small pure-Python `contrast_ratio()` helper
+  computes WCAG ratios for the text pairs the app renders. Tokens are read from
+  their real sources (`.streamlit/config.toml` and `streamlit_app._BRAND_CSS`),
+  so the ratios re-derive if a token changes. Gated pairs — `textColor` on
+  `backgroundColor` (~15.9:1) and the CSS-override text on
+  `secondaryBackgroundColor` (~14.7:1) — must clear 4.5:1 (normal text).
+- **2.1 Keyboard & 1.3 Adaptable (rendered smoke):** via the existing
+  `AppTest.from_file` harness — interactive widgets carry accessible labels,
+  emitted `<img>`s keep alt text (guards the TRSET-3 logo), the app's
+  `unsafe_allow_html` blocks add no positive `tabindex`, and severity info is
+  conveyed as text, not color alone. A full-run integration test asserts all
+  three markers at the rendered-tree boundary against the real config library.
+
+Example:
+
+```bash
+python -m pytest tests/test_accessibility.py     # arm64 conda env, never `uv run`
+```
+
+**Known finding (not a gate):** brand `primaryColor` `#627CFF` is ~3.6:1 on
+white — below the 4.5:1 normal-text minimum. It is **excluded** from the
+pass/fail gate per adjudication (brand color; remediation is a separate ticket);
+one test documents the known value and flags loudly only if it shifts out of
+band. Regression risk for this change is Low (additive, GUI-repo test layer;
+no simulator or `gui_runner` change), so no rollback note applies.
