@@ -137,17 +137,23 @@ def synthetic_library(tmp_path_factory):
     # NOT the real "test" collection, which has an unrelated pre-existing broken
     # config (see module docstring) that would fail every "Run all" on it.
     # cancel_event is only rechecked once per scenario FILE (gui_runner.py's loop),
-    # while progress only fires once per completed DIRECTORY -- so each directory
-    # gets 3 duplicate scenario files (not 1), giving a real multi-second window
-    # during the second directory's processing for a cancel to land after the
-    # first directory's progress has already fired, instead of a race decided in
-    # a single Python statement gap.
+    # while progress only fires once per completed DIRECTORY -- and the first
+    # directory's progress fires in the same iteration as (and just before) a
+    # cancel check, too early for the test's cancel to land. So the cancel is
+    # only ever observed at the SECOND directory's second-or-later file: each
+    # directory needs >= 2 duplicate scenario files (2, not 1; directory order
+    # is filesystem-dependent, so both need it). 2 copies -- not the original 3
+    # -- is the minimum that preserves this, and matters because TRSET-24
+    # (simulator e18c0480) made each file ~4x slower (~10.5s: the Swift
+    # prediction-API extraction re-runs the full Swift algorithm 6 extra times
+    # per step), which is also what the per-file cancel window comfortably
+    # rides on now.
     multi_dir_a = os.path.join(multi_collection_dir, "TLR-MULTI-A")
     multi_dir_b = os.path.join(multi_collection_dir, "TLR-MULTI-B")
     os.makedirs(multi_dir_a, exist_ok=True)
     os.makedirs(multi_dir_b, exist_ok=True)
     for d, name in [(multi_dir_a, "TLR-MULTI-A"), (multi_dir_b, "TLR-MULTI-B")]:
-        for i in range(3):
+        for i in range(2):
             config = json.loads(json.dumps(base_config))
             with open(os.path.join(d, f"Simulation-Configuration-{name}_median_v1_copy{i}.json"), "w") as fh:
                 json.dump(config, fh, indent=2)
@@ -273,14 +279,17 @@ def test_no_usable_data_surfaced_explicitly():
 # ---------------------------------------------------------------------------
 
 def test_multi_tlr_aggregation_yields_one_assessment_per_directory():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = AppTest.from_file("streamlit_app.py", default_timeout=120)
     at.run()
     _select_collection(at, MULTI_COLLECTION_NAME)
     # scope_choice defaults to "All directories in this collection" -- no
     # second selectbox needed; target_risk_dir stays None.
 
     assert not at.button[0].disabled
-    _click_run_and_wait(at, timeout=60)
+    # Budget sized to measured runtime (2026-07-29): 4 scenario files at
+    # ~10.5s of simulation each (plus plot + assessment) since TRSET-24's
+    # ~4x per-sim slowdown => ~45s measured, 120s gives >2x headroom.
+    _click_run_and_wait(at, timeout=120)
 
     assert not at.exception
     result = at.session_state["run_result"]
@@ -308,13 +317,19 @@ def test_cancel_mid_run_stops_before_completing_every_directory():
 
     # Wait for the first directory to finish (real progress, not a fixed sleep guess)
     # before cancelling, so this exercises a genuine "some done, more pending" cancellation.
-    deadline = time.time() + 30
+    # Deadline sized to measured runtime (2026-07-29): the first directory is
+    # 2 scenario files at ~10.5s of simulation each (plus plot) since
+    # TRSET-24's ~4x per-sim slowdown => ~25s measured, 60s gives >2x headroom.
+    deadline = time.time() + 60
     while at.session_state["progress"] is None and time.time() < deadline:
         time.sleep(0.2)
-    assert at.session_state["progress"] is not None, "No directory completed within 30s -- cannot test a mid-run cancel"
+    assert at.session_state["progress"] is not None, "No directory completed within 60s -- cannot test a mid-run cancel"
 
     cancel_event.set()
-    thread.join(timeout=30)
+    # The cancel lands during the second directory's first file and is honored
+    # at its next per-file recheck, so the join must outlast one full scenario
+    # file (~15s) plus slack.
+    thread.join(timeout=60)
     assert not thread.is_alive()
     at.run()
 
