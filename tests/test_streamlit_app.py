@@ -169,7 +169,7 @@ def test_integration_full_app_run_renders_header_and_logo():
     assert not at.exception
 
     # Header: title present and the real library populated the collection selector.
-    assert any(t.value == "Tidepool Loop Risk Assessment" for t in at.title)
+    assert any(t.value == "Tidepool Loop Risk Severity Estimation Tool" for t in at.title)
     collection_selectbox = [sb for sb in at.selectbox if sb.label == "Config collection"][0]
     assert len(collection_selectbox.options) > 0
 
