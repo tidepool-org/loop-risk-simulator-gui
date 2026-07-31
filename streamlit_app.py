@@ -18,10 +18,20 @@ import streamlit as st
 from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 from tidepool_data_science_simulator.utils import PROJECT_ROOT_DIR
+from tidepool_data_science_simulator.trace import TraceReadError, read_trace
+# gui_runner is the single validated entry point for simulator behavior, and it
+# re-exports severity_model's stage identity (classify_sim_id / STAGE_ORDER /
+# STAGE_DISPLAY) so the view layer neither redeclares the stage vocabulary nor
+# replicates the post_processing/ sys.path setup that makes it importable.
 from tidepool_data_science_simulator.projects.risk.gui_runner import (
+    classify_sim_id,
     run_risk_assessment,
     validate_config_dir,
+    STAGE_DISPLAY,
+    STAGE_ORDER,
 )
+
+from loop_home_renderer import render_loop_home_screen
 
 # Root of the config library the selector browses. Defaults to the simulator's
 # in-tree scenario_configs (correct for an editable/sibling install). Under the
@@ -82,9 +92,6 @@ _ALLOWED_COLLECTIONS = (
     else ("loop_risk_v2_2_0_full", "loop_risk_v2_510k")
 )
 
-STAGE_ORDER = ["pre", "no_loop", "post"]
-STAGE_DISPLAY = {"pre": "Pre-mitigation", "no_loop": "No Loop", "post": "Post-mitigation"}
-
 
 def _list_collections():
     if not os.path.isdir(LIBRARY_ROOT):
@@ -108,18 +115,25 @@ def _list_tlr_dirs(collection_dir):
     )
 
 
-def _plot_caption(png_path, risk_dir_name):
-    """Best-effort VP-profile label for a result plot, read back from its filename.
+def _profile_label(name, risk_dir_name):
+    """Best-effort VP-profile label read back from a profile-bearing filename.
 
-    gui_runner names each figure "{risk_dir_name}_{scenario_json_name}_{ts}.png",
-    where scenario_json_name is the profile's config file, e.g.
-    "Simulation-Configuration-TLR-909_02_05_adolescent_profile_v1.json". The
-    profile token is the segment before "_profile". This is presentation-only --
-    the profile identity is already in the name, so we read it here rather than
-    changing anything the simulator writes. Returns None if the name doesn't
-    match the expected shape, so the image still renders (just without a caption).
+    Works for either name the run produces, because both embed the same
+    "Simulation-Configuration-{risk_dir_name}_{profile}_profile..." segment:
+
+      * a scenario config filename, e.g.
+        "Simulation-Configuration-TLR-909_02_05_adolescent_profile_v1.json"
+        (one config file is one VP profile) -- the row labels for the Loop-home
+        charts;
+      * gui_runner's figure filename, "{risk_dir_name}_{scenario_json_name}_{ts}.png".
+
+    The profile token is the segment before "_profile". This is
+    presentation-only -- the profile identity is already in the name, so we read
+    it here rather than changing anything the simulator writes. Returns None if
+    the name doesn't match the expected shape, so callers can fall back rather
+    than fail.
     """
-    stem = os.path.basename(png_path)
+    stem = os.path.basename(name)
     if stem.lower().endswith(".png"):
         stem = stem[:-4]
     marker = "Simulation-Configuration-"
@@ -136,6 +150,86 @@ def _plot_caption(png_path, risk_dir_name):
     if not profile:
         return None
     return f"{profile.capitalize()} profile"
+
+
+def _profile_stage_rows(trace_paths, risk_dir_name: str) -> list:
+    """Group a RiskDirRunResult's trace paths into one row per VP profile.
+
+    Returns ``[(profile_label, {stage: tsv_path}), ...]`` sorted by label. One
+    scenario config file is one VP profile and its sim_ids are that profile's
+    stages, so the scenario file is the row unit; the stage comes from
+    ``classify_sim_id`` -- severity_model's single source of truth, not any
+    prefix logic of our own.
+
+    A sim_id whose stage does not classify is left out, so its column shows the
+    explicit "No data" placeholder instead of being forced into a wrong stage.
+    Two distinct sim_ids in one config file never classify to the same stage
+    (verified across all 2724 config files in the library), so the per-file
+    stage map cannot silently lose a sim.
+    """
+    rows = [
+        (
+            _profile_label(scenario_config_name, risk_dir_name) or scenario_config_name,
+            {
+                stage: tsv_path
+                for sim_id, tsv_path in sims.items()
+                if (stage := classify_sim_id(sim_id)) is not None
+            },
+        )
+        for scenario_config_name, sims in trace_paths.items()
+    ]
+    return sorted(rows, key=lambda row: row[0])
+
+
+@st.cache_data(show_spinner=False)
+def _trace_png(tsv_path: str) -> bytes:
+    """Loop-home-screen PNG bytes for one sim's trace, cached by path.
+
+    Streamlit re-executes the whole script on every interaction, and one TLR
+    directory is 3 charts per profile -- far too much matplotlib work to redo on
+    each rerun. Run output directories are timestamped and never rewritten, so
+    the path alone is a sound cache key.
+    """
+    return render_loop_home_screen(read_trace(tsv_path))
+
+
+def _render_stage_chart(tsv_path) -> None:
+    """Render one stage's Loop-home chart, or an explicit placeholder for it.
+
+    A stage with no trace renders "No data" -- never blank-silent and never a
+    fabricated chart. An unreadable trace is surfaced as its own message naming
+    the file, so a failed read stays distinguishable from an absent stage rather
+    than being swallowed.
+    """
+    if tsv_path is None:
+        st.info("No data")
+        return
+    try:
+        st.image(_trace_png(tsv_path))
+    except (TraceReadError, OSError) as exc:
+        st.warning(f"Could not render {os.path.basename(tsv_path)}: {exc}")
+
+
+def _render_profile_charts(result) -> None:
+    """Render one row per VP profile: three co-equal Loop-home chart columns.
+
+    TWI-0006 section 2.g.ii: the stages are presented side by side as equals and
+    the reader compares across them to judge which applies. There is deliberately
+    no selector, no "primary" stage and no auto-collapsing -- every stage column
+    is always drawn, carrying either its chart or an explicit placeholder.
+    """
+    rows = _profile_stage_rows(result.trace_paths, result.risk_dir_name)
+    if not rows:
+        st.caption("No simulation traces were produced for this directory.")
+        return
+
+    st.markdown("**Loop home-screen charts**")
+    for profile_label, stage_paths in rows:
+        st.markdown(f"**{profile_label}**")
+        for column, stage in zip(st.columns(len(STAGE_ORDER)), STAGE_ORDER):
+            with column:
+                st.markdown(f"*{STAGE_DISPLAY[stage]}*")
+                _render_stage_chart(stage_paths.get(stage))
 
 
 def _init_session_state():
@@ -231,9 +325,11 @@ def _render_risk_dir_result(result):
                 hide_index=True,
             )
 
-        for png_path in result.png_paths:
-            if os.path.exists(png_path):
-                st.image(png_path, caption=_plot_caption(png_path, result.risk_dir_name))
+        # TRSET-23: the generic three-panel simulator PNGs (result.png_paths) are
+        # no longer rendered -- per-stage, per-profile Loop-home charts replace
+        # them. The png_paths plumbing stays in gui_runner for now (removal is a
+        # follow-up once these charts are validated in use).
+        _render_profile_charts(result)
 
 
 @st.fragment(run_every=1)

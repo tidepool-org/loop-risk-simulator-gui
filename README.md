@@ -183,3 +183,48 @@ the Loop algorithm interface, the scenario-config schema, or RTF output. Banner
 is on the main page only, not exported artifacts. Regression risk Low–Medium
 (shares the render path and interacts with the TRSET-4 contrast gate, but reuses
 already-gated tokens); not a breaking change, so no rollback note applies.
+
+## Loop home-screen charts in the results pane (TRSET-23)
+
+**What changed (≤100 words):** The results pane no longer renders the generic
+three-panel simulator PNGs. Each TLR-* expander now shows **one row per VP
+profile**, each row three co-equal columns — Pre-mitigation | No Loop |
+Post-mitigation — of TRSET-22 Loop-home-screen charts, read from that sim's
+`<sim_id>.tsv` via TRSET-21's `read_trace`. `gui_runner.RiskDirRunResult` gains
+an additive `trace_paths` field (`scenario_config_filename -> {sim_id: tsv}`)
+that supplies them. Stage identity comes from `severity_model.classify_sim_id`
+and the order/labels from `STAGE_ORDER`/`STAGE_DISPLAY`, re-exported through
+`gui_runner` so the view layer no longer redeclares them.
+
+Example:
+
+```bash
+streamlit run streamlit_app.py     # run a TLR directory; charts appear under its metrics table
+```
+
+**Validation (≤100 words):** An integration test runs the real
+`run_risk_assessment` on the real `test/TLR-QAE-482-test` config directory
+(copied into a temp library), then drives the returned trace paths through the
+real `read_trace` → `render_loop_home_screen`, asserting non-blank 900×1100 PNGs,
+and re-renders the resulting `RunResult` through `AppTest` to assert one chart per
+present stage. That directory genuinely defines no `no_loop` stage, so the "No
+data" placeholder is exercised against real data. Unit tests cover the profile
+label parser, the (profile → stage) grouping, and the placeholder/error branches.
+Full GUI suite: 108 passed, 7 skipped.
+
+**Cautions / limitations:** The three stages are always drawn side by side as
+equals with no selector and no auto-collapsing (TWI-0006 §2.g.ii). A missing
+stage renders an explicit "No data"; an unreadable trace renders its own message
+so a failed read stays distinguishable from an absent stage. PNG bytes are
+`st.cache_data`-cached by trace path, since Streamlit re-executes the script on
+every interaction and one directory is three charts per profile. `png_paths` and
+`plot_sim_results` plumbing remains in `gui_runner` but is no longer rendered —
+removing it is a follow-up. **Known limitation:** `classify_sim_id` does not
+match three post-stage prefix spellings present in the library
+(`post-Loop_withMitigations_`, `post-Loop-withMitigations_`,
+`post_Loop_WithMitigations_`), so those directories show "No data" in the
+Post-mitigation column — the same pre-existing gap their metrics-table row
+already has; filed separately, not fixed here. Regression risk Medium (shared
+runner entry point plus the app's main render path), contained by the
+`gui_runner` change being purely additive: no existing field, signature, or
+schema changed, so this is not a breaking change and no rollback note applies.
