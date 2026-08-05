@@ -11,6 +11,7 @@ temp directory with no changes required there.
 
 import base64
 import os
+import tempfile
 import threading
 
 import pandas as pd
@@ -32,6 +33,9 @@ from tidepool_data_science_simulator.projects.risk.gui_runner import (
 )
 
 from loop_home_renderer import render_loop_home_screen
+# Zip/RTF assembly for the export (TRSET-7). Kept out of this module so the view
+# layer stays presentation-only, per this file's docstring.
+from export_bundle import build_export_zip, chart_filename
 
 # Root of the config library the selector browses. Defaults to the simulator's
 # in-tree scenario_configs (correct for an editable/sibling install). Under the
@@ -232,6 +236,123 @@ def _render_profile_charts(result) -> None:
                 _render_stage_chart(stage_paths.get(stage))
 
 
+def _reset_export_state() -> None:
+    """Drop any built export, so it is never offered against a different run."""
+    st.session_state.export_zip_path = None
+    st.session_state.export_skipped = []
+    st.session_state.export_error = None
+
+
+def _export_temp_dir() -> str:
+    """Session-scoped temp directory the export zips are built in.
+
+    A temp path (not memory, not a hardcoded location) so a large run's archive
+    streams to disk; created once per session and reused, because the zip has to
+    outlive the rerun that the download click triggers.
+    """
+    if st.session_state.export_temp_dir is None:
+        st.session_state.export_temp_dir = tempfile.mkdtemp(prefix="risk_export_")
+    return st.session_state.export_temp_dir
+
+
+def _export_chart_files(result) -> tuple:
+    """``(charts, skipped)`` for one TLR dir: one PNG per profile x present stage.
+
+    Charts are ``(filename, png_bytes)``, reusing the same
+    ``_trace_png`` -> ``render_loop_home_screen`` path (and its cache) the results
+    pane draws, so exported and on-screen charts cannot diverge. A stage with no
+    trace, or one whose trace cannot be read, is skipped and reported in
+    ``skipped`` -- never written as a blank or fabricated chart.
+    """
+    charts = []
+    skipped = []
+    for profile_label, stage_paths in _profile_stage_rows(result.trace_paths, result.risk_dir_name):
+        for stage in STAGE_ORDER:
+            tsv_path = stage_paths.get(stage)
+            label = f"{result.risk_dir_name} / {profile_label} / {STAGE_DISPLAY[stage]}"
+            if tsv_path is None:
+                skipped.append(f"{label}: no simulation trace for this stage.")
+                continue
+            try:
+                png_bytes = _trace_png(tsv_path)
+            except (TraceReadError, OSError) as exc:
+                skipped.append(f"{label}: could not render {os.path.basename(tsv_path)}: {exc}")
+                continue
+            charts.append(
+                (chart_filename(result.risk_dir_name, profile_label, STAGE_DISPLAY[stage]), png_bytes)
+            )
+    return charts, skipped
+
+
+@st.cache_data(show_spinner=False)
+def _zip_bytes(zip_path: str) -> bytes:
+    """The built zip's bytes for st.download_button, cached by path.
+
+    st.download_button needs its payload present on every rerun, and each
+    interaction reruns the script; the zip is written once to a unique temp path
+    and never rewritten, so the path alone is a sound cache key.
+    """
+    with open(zip_path, "rb") as zip_file:
+        return zip_file.read()
+
+
+def _build_export(run_result) -> None:
+    """Build the export zip for a completed run and record the outcome.
+
+    Two steps (build, then download) is not a stylistic choice: st.download_button
+    materializes its payload at render time, so a single-click version would
+    rebuild the whole zip on every rerun.
+    """
+    try:
+        charts = []
+        skipped = []
+        for risk_dir_result in run_result.risk_dir_results:
+            dir_charts, dir_skipped = _export_chart_files(risk_dir_result)
+            charts.extend(dir_charts)
+            skipped.extend(dir_skipped)
+        zip_path = build_export_zip(run_result.save_dir, charts, _export_temp_dir())
+    except Exception as exc:  # surfaced in the UI -- never swallowed
+        _reset_export_state()
+        st.session_state.export_error = str(exc)
+    else:
+        st.session_state.export_zip_path = zip_path
+        st.session_state.export_skipped = skipped
+        st.session_state.export_error = None
+
+
+def _render_export_control(run_result) -> None:
+    """Offer the completed run as one downloadable zip.
+
+    The zip carries the severity-summary RTFs, the Loop-home chart PNGs and every
+    raw output the run wrote. Only shown for a run that completed -- a cancelled
+    run has no complete set of outputs to export.
+    """
+    st.markdown("**Export**")
+    st.caption(
+        "One zip with the severity-summary RTFs, the Loop home-screen charts and "
+        "this run's raw output files."
+    )
+    if st.button("Export results"):
+        _build_export(run_result)
+
+    if st.session_state.export_error is not None:
+        st.error(f"Export failed: {st.session_state.export_error}")
+    if st.session_state.export_skipped:
+        st.warning(
+            "Some charts were not exported:\n\n"
+            + "\n".join(f"- {reason}" for reason in st.session_state.export_skipped)
+        )
+
+    zip_path = st.session_state.export_zip_path
+    if zip_path is not None:
+        st.download_button(
+            "Download export (.zip)",
+            data=_zip_bytes(zip_path),
+            file_name=os.path.basename(zip_path),
+            mime="application/zip",
+        )
+
+
 def _init_session_state():
     defaults = {
         "cancel_event": None,
@@ -239,6 +360,12 @@ def _init_session_state():
         "progress": None,  # (completed, total, risk_dir_name)
         "run_result": None,
         "run_error": None,
+        # Export state (TRSET-7). Held across reruns because clicking the
+        # download button is itself a rerun, and the zip must survive it.
+        "export_temp_dir": None,
+        "export_zip_path": None,
+        "export_skipped": [],
+        "export_error": None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -251,6 +378,8 @@ def _start_run(config_dir, target_risk_dir):
     st.session_state.progress = None
     st.session_state.run_result = None
     st.session_state.run_error = None
+    # A previous run's export must not be offered against the new run.
+    _reset_export_state()
 
     def _progress_callback(completed, total, risk_dir_name):
         st.session_state.progress = (completed, total, risk_dir_name)
@@ -492,6 +621,10 @@ def main():
     if result is not None:
         if result.cancelled:
             st.warning(f"Run cancelled. {len(result.risk_dir_results)} director(y/ies) completed before cancellation.")
+        else:
+            # Above the per-directory expanders so it is not buried under a
+            # collection's worth of charts.
+            _render_export_control(result)
         for risk_dir_result in result.risk_dir_results:
             _render_risk_dir_result(risk_dir_result)
 

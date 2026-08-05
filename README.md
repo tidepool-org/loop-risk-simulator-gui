@@ -228,3 +228,55 @@ already has; filed separately, not fixed here. Regression risk Medium (shared
 runner entry point plus the app's main render path), contained by the
 `gui_runner` change being purely additive: no existing field, signature, or
 schema changed, so this is not a breaking change and no rollback note applies.
+
+## Exportable results (TRSET-7)
+
+**What changed (≤100 words):** A completed run now offers an **Export results**
+control that produces one zip and hands it over as a browser download. The zip
+nests everything under a single `risk_run_<timestamp>/` folder: every raw output
+the run wrote (summary CSVs, `<sim_id>.tsv` traces, the simulator figures,
+`loop_algo_io/`, `metadata.json`), the `risk_summary_<sim_id>.rtf` severity
+summaries — generated at export time by the unmodified
+`create_severity_summary.process_results_directory` — and a `charts/` folder of
+the Loop home-screen PNGs, one per VP profile × stage. Assembly lives in the new
+streamlit-free `export_bundle.py`; `gui_runner` gains a `metadata.json` write and
+re-exports the RTF renderer.
+
+Example:
+
+```bash
+streamlit run streamlit_app.py     # run a directory, then: Export results -> Download export (.zip)
+```
+
+Chart files are named `<TLR dir>_<profile>_<stage>.png` (e.g.
+`TLR-909_Adolescent_profile_Pre-mitigation.png`), sanitized to
+`[A-Za-z0-9._-]`; a stage with no trace, or an unreadable one, is skipped and
+listed in an on-screen warning rather than exported as a blank chart.
+
+**Validation (≤100 words):** An integration test runs the real
+`run_risk_assessment` on the real `test/TLR-QAE-482-test` config (copied into a
+temp library), exports it for real, and asserts **at the zip boundary**:
+`metadata.json` dated like the displayed assessment, an RTF whose bytes are
+identical to the one on disk, `charts/` holding exactly the two PNGs (900×1100)
+for the stages that directory genuinely defines and none for the `no_loop` stage
+it lacks, the raw outputs present, and nothing from outside `save_dir`. It then
+drives the whole thing through `AppTest`. Unit tests cover naming/sanitization,
+archive layout, the guard rails, and the control's states. GUI suite: 138
+passed, 7 skipped. Simulator `test_gui_runner` 16/16, RTF renderer suite 32/32
+unchanged.
+
+**Cautions / limitations:** Export is two clicks by necessity —
+`st.download_button` materializes its payload at render time, so a one-click
+version would rebuild the zip on every rerun. The zip is built to a
+session-scoped `tempfile` directory and written file-by-file (never assembled in
+memory); its bytes are read once for the download and cached by path. A
+cancelled run is not exportable, and a run directory missing `metadata.json` or
+any `TLR-*` dir raises rather than shipping a summary-free zip — the two cases
+`process_results_directory` otherwise only prints and returns on. Charts are
+loose files: the filename carries their identity, not the app's profile × stage
+grid. The `classify_sim_id` prefix gap noted under TRSET-23 applies here too — a
+stage it cannot classify has no chart in the export, listed as skipped.
+Regression risk Medium (GUI run path plus run-directory contents, which now also
+carry `metadata.json` and the RTFs); additive only — no existing field,
+signature, schema, or RTF byte changed — so this is not a breaking change and no
+rollback note applies.
