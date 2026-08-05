@@ -23,7 +23,14 @@ sys.path.insert(0, "post_processing")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tidepool_data_science_simulator.projects.risk.gui_runner import RunResult, RiskDirRunResult  # noqa: E402
 from severity_model import SeverityAssessment, StageResult  # noqa: E402
-from streamlit_app import _plot_caption  # noqa: E402
+from streamlit_app import _profile_label, _profile_stage_rows  # noqa: E402
+
+_TEST_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_data")
+# The two real captured run TSVs committed for TRSET-22: a 'pre' stage and a
+# 'no_loop' stage of the same profile. 'post' is deliberately absent, so these
+# also exercise the missing-stage placeholder.
+_PRE_TSV = os.path.join(_TEST_DATA_DIR, "pre-Loop_NoMitigations_t1_median.tsv")
+_NO_LOOP_TSV = os.path.join(_TEST_DATA_DIR, "pre-noLoop_t1_median.tsv")
 
 
 def _make_fake_assessment():
@@ -253,9 +260,11 @@ def test_cancelled_run_renders_cancellation_warning():
 
 
 # ---------------------------------------------------------------------------
-# _plot_caption: VP-profile label read back from the figure filename
-# (TRSET-2). Presentation-only -- derives the profile from the name gui_runner
-# already writes, "{risk_dir}_{scenario_json_name}_{ts}.png".
+# _profile_label: VP-profile label read back from a profile-bearing filename
+# (TRSET-2, generalized in TRSET-23). Presentation-only -- derives the profile
+# from names the run already produces: the figure name gui_runner writes,
+# "{risk_dir}_{scenario_json_name}_{ts}.png", or the scenario config filename
+# itself, which is what labels the Loop-home chart rows.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("risk_dir_name, png_name, expected", [
@@ -276,10 +285,172 @@ def test_cancelled_run_renders_cancellation_warning():
         "Sensitive profile",
     ),
 ])
-def test_plot_caption_extracts_profile(risk_dir_name, png_name, expected):
-    assert _plot_caption(f"/some/dir/{png_name}", risk_dir_name) == expected
+def test_profile_label_extracts_profile_from_figure_name(risk_dir_name, png_name, expected):
+    assert _profile_label(f"/some/dir/{png_name}", risk_dir_name) == expected
 
 
-def test_plot_caption_returns_none_for_unexpected_name():
-    # An off-pattern filename must not raise -- the image renders uncaptioned.
-    assert _plot_caption("/some/dir/unexpected.png", "TLR-909") is None
+@pytest.mark.parametrize("risk_dir_name, scenario_config_name, expected", [
+    (
+        "TLR-553",
+        "Simulation-Configuration-TLR-553_Adolescent_profile.json",
+        "Adolescent profile",
+    ),
+    (
+        "TLR-909_02_05",
+        "Simulation-Configuration-TLR-909_02_05_t2_sensitive_profile_v1.json",
+        "T2 sensitive profile",
+    ),
+    (
+        # Lowercase "_profile" and a version suffix normalize the same way.
+        "TLR-620",
+        "Simulation-Configuration-TLR-620_median_profile_v1.json",
+        "Median profile",
+    ),
+])
+def test_profile_label_extracts_profile_from_scenario_config_name(
+    risk_dir_name, scenario_config_name, expected
+):
+    # TRSET-23: the same parser labels the Loop-home chart rows straight from the
+    # scenario config filename -- one config file is one VP profile.
+    assert _profile_label(scenario_config_name, risk_dir_name) == expected
+
+
+def test_profile_label_returns_none_for_unexpected_name():
+    # An off-pattern name must not raise -- callers fall back to the raw name.
+    assert _profile_label("/some/dir/unexpected.png", "TLR-909") is None
+
+
+# ---------------------------------------------------------------------------
+# _profile_stage_rows: (profile -> {stage -> trace path}) grouping (TRSET-23)
+# ---------------------------------------------------------------------------
+
+def test_profile_stage_rows_groups_by_profile_and_classifies_stages():
+    trace_paths = {
+        "Simulation-Configuration-TLR-553_Median_profile.json": {
+            "pre-Loop_NoMitigations_t1_median": "/runs/pre_median.tsv",
+            "pre-noLoop_t1_median": "/runs/noloop_median.tsv",
+            "post-Loop-WithMitigations_t1_median": "/runs/post_median.tsv",
+        },
+        "Simulation-Configuration-TLR-553_Adolescent_profile.json": {
+            "pre-Loop_NoMitigations_t1_adolescent": "/runs/pre_adolescent.tsv",
+        },
+    }
+    rows = _profile_stage_rows(trace_paths, "TLR-553")
+
+    # Sorted by label, so render order is deterministic regardless of the
+    # filesystem order build_risk_sim_generator happened to yield.
+    assert [label for label, _ in rows] == ["Adolescent profile", "Median profile"]
+    assert rows[0][1] == {"pre": "/runs/pre_adolescent.tsv"}
+    assert rows[1][1] == {
+        "pre": "/runs/pre_median.tsv",
+        "no_loop": "/runs/noloop_median.tsv",
+        "post": "/runs/post_median.tsv",
+    }
+
+
+def test_profile_stage_rows_omits_unclassifiable_sim_ids():
+    # An unrecognized sim_id prefix must not be forced into a stage -- it drops
+    # out, and that column then renders the explicit "No data" placeholder.
+    trace_paths = {
+        "Simulation-Configuration-TLR-590_Median_profile.json": {
+            "pre-Loop_NoMitigations_t1_median": "/runs/pre.tsv",
+            # Real spelling from the library that severity_model does not match.
+            "post-Loop_withMitigations_t1_median": "/runs/post.tsv",
+        },
+    }
+    rows = _profile_stage_rows(trace_paths, "TLR-590")
+    assert rows[0][1] == {"pre": "/runs/pre.tsv"}
+
+
+def test_profile_stage_rows_falls_back_to_raw_name_when_unparseable():
+    rows = _profile_stage_rows({"weird_name.json": {"pre-noLoop_x": "/runs/x.tsv"}}, "TLR-1")
+    assert rows == [("weird_name.json", {"no_loop": "/runs/x.tsv"})]
+
+
+def test_profile_stage_rows_empty_for_no_traces():
+    assert _profile_stage_rows({}, "TLR-1") == []
+
+
+# ---------------------------------------------------------------------------
+# Loop-home chart rendering in the results pane (TRSET-23)
+# ---------------------------------------------------------------------------
+
+def _chart_result(trace_paths, risk_dir_name="TLR-TEST"):
+    return RunResult(
+        save_dir="/tmp/fake",
+        risk_dir_results=[
+            RiskDirRunResult(risk_dir_name, _make_fake_assessment(), [], trace_paths)
+        ],
+        cancelled=False,
+    )
+
+
+def test_loop_home_charts_render_three_coequal_stage_columns():
+    # Real captured run TSVs for 'pre' and 'no_loop'; 'post' is absent. All three
+    # stage columns must still render (TWI-0006 2.g.ii -- co-equal, never
+    # collapsed), with the missing one carrying an explicit "No data".
+    fake_result = _chart_result({
+        "Simulation-Configuration-TLR-TEST_Median_profile.json": {
+            "pre-Loop_NoMitigations_t1_median": _PRE_TSV,
+            "pre-noLoop_t1_median": _NO_LOOP_TSV,
+        },
+    })
+    at = AppTest.from_file("streamlit_app.py", default_timeout=120)
+    at.session_state["run_result"] = fake_result
+    at.run()
+
+    assert not at.exception
+    assert len(at.image) == 2
+    assert [i.value for i in at.info] == ["No data"]
+
+    markdown_values = [m.value for m in at.markdown]
+    assert "**Median profile**" in markdown_values
+    # Every stage header is present, in severity_model's order.
+    stage_headers = [v for v in markdown_values if v in ("*Pre-mitigation*", "*No Loop*", "*Post-mitigation*")]
+    assert stage_headers == ["*Pre-mitigation*", "*No Loop*", "*Post-mitigation*"]
+    # No selector gates the stages.
+    assert not [sb for sb in at.selectbox if "stage" in sb.label.lower()]
+
+
+def test_generic_simulator_pngs_are_no_longer_rendered():
+    # TRSET-23 replaces the generic three-panel PNGs. png_paths may still be
+    # populated by gui_runner, but nothing renders them.
+    fake_result = RunResult(
+        save_dir="/tmp/fake",
+        risk_dir_results=[
+            RiskDirRunResult("TLR-TEST", _make_fake_assessment(), [_PRE_TSV], {})
+        ],
+        cancelled=False,
+    )
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.session_state["run_result"] = fake_result
+    at.run()
+
+    assert not at.exception
+    assert len(at.image) == 0
+
+
+def test_unreadable_trace_is_surfaced_not_swallowed():
+    fake_result = _chart_result({
+        "Simulation-Configuration-TLR-TEST_Median_profile.json": {
+            "pre-Loop_NoMitigations_t1_median": "/does/not/exist.tsv",
+        },
+    })
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.session_state["run_result"] = fake_result
+    at.run()
+
+    assert not at.exception
+    assert any("could not render" in w.value.lower() for w in at.warning)
+    # A failed read is distinguishable from an absent stage: the other two
+    # columns still say "No data", this one does not.
+    assert [i.value for i in at.info] == ["No data", "No data"]
+
+
+def test_no_traces_reports_it_rather_than_rendering_nothing():
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.session_state["run_result"] = _chart_result({})
+    at.run()
+
+    assert not at.exception
+    assert any("no simulation traces" in c.value.lower() for c in at.caption)
