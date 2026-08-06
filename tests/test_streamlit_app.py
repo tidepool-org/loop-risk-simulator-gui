@@ -23,7 +23,7 @@ sys.path.insert(0, "post_processing")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tidepool_data_science_simulator.projects.risk.gui_runner import RunResult, RiskDirRunResult  # noqa: E402
 from severity_model import SeverityAssessment, StageResult  # noqa: E402
-from streamlit_app import _profile_label, _profile_stage_rows  # noqa: E402
+from streamlit_app import _export_chart_files, _profile_label, _profile_stage_rows  # noqa: E402
 
 _TEST_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_data")
 # The two real captured run TSVs committed for TRSET-22: a 'pre' stage and a
@@ -454,3 +454,185 @@ def test_no_traces_reports_it_rather_than_rendering_nothing():
 
     assert not at.exception
     assert any("no simulation traces" in c.value.lower() for c in at.caption)
+
+
+# ---------------------------------------------------------------------------
+# Export control (TRSET-7)
+# ---------------------------------------------------------------------------
+
+def _export_buttons(at):
+    return [b for b in at.button if b.label == "Export results"]
+
+
+def _fake_save_dir(tmp_path, tlr_dir_name="TLR-TEST"):
+    """A minimal completed-run save_dir: metadata.json plus one TLR dir.
+
+    Enough for the real export_bundle to archive; the RTF renderer itself needs a
+    real run's summary CSVs, so it is stubbed in the tests that get that far and
+    exercised for real in test_trset7_integration.py.
+    """
+    save_dir = tmp_path / "Risk_Run_2026-08-05T09:15:00.123456"
+    (save_dir / tlr_dir_name).mkdir(parents=True)
+    (save_dir / "metadata.json").write_text('{"timestamp": "2026-08-05T09:15:00.123456"}')
+    (save_dir / tlr_dir_name / "summary_results_Simulation-Configuration-TLR-TEST.csv").write_text("sim_id\n")
+    return str(save_dir)
+
+
+@pytest.fixture
+def stub_summary_writer(monkeypatch):
+    """Stub the RTF renderer at its export_bundle seam.
+
+    AppTest re-execs streamlit_app.py per run, and its `from export_bundle import
+    build_export_zip` resolves through the already-imported export_bundle module,
+    so patching the attribute there does reach the app's copy.
+    """
+    import export_bundle
+
+    monkeypatch.setattr(export_bundle, "process_results_directory", lambda results_dir: None)
+
+
+def test_no_export_control_before_a_run():
+    # Nothing to export until a run has produced results.
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.run()
+
+    assert not at.exception
+    assert not _export_buttons(at)
+    assert not at.download_button
+
+
+def test_no_export_control_for_a_cancelled_run():
+    # A cancelled run has no complete set of outputs, so it is not exportable.
+    fake_result = RunResult(
+        save_dir="/tmp/fake",
+        risk_dir_results=[RiskDirRunResult("TLR-TEST", _make_fake_assessment(), [])],
+        cancelled=True,
+    )
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.session_state["run_result"] = fake_result
+    at.run()
+
+    assert not at.exception
+    assert not _export_buttons(at)
+    assert not at.download_button
+
+
+def test_completed_run_offers_the_export_control_but_no_download_yet():
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.session_state["run_result"] = _chart_result({})
+    at.run()
+
+    assert not at.exception
+    assert len(_export_buttons(at)) == 1
+    # The zip is built on activation, not speculatively on every rerun.
+    assert not at.download_button
+
+
+def test_export_click_builds_a_zip_and_offers_it_for_download(tmp_path, stub_summary_writer):
+    save_dir = _fake_save_dir(tmp_path)
+    fake_result = RunResult(
+        save_dir=save_dir,
+        risk_dir_results=[
+            RiskDirRunResult("TLR-TEST", _make_fake_assessment(), [], {
+                "Simulation-Configuration-TLR-TEST_Median_profile.json": {
+                    "pre-Loop_NoMitigations_t1_median": _PRE_TSV,
+                    "pre-noLoop_t1_median": _NO_LOOP_TSV,
+                },
+            })
+        ],
+        cancelled=False,
+    )
+    at = AppTest.from_file("streamlit_app.py", default_timeout=120)
+    at.session_state["run_result"] = fake_result
+    at.run()
+    _export_buttons(at)[0].click().run()
+
+    assert not at.exception
+    assert not at.error
+    assert len(at.download_button) == 1
+    assert at.download_button[0].label == "Download export (.zip)"
+    zip_path = at.session_state["export_zip_path"]
+    # Named for the run it came from, in a temp dir -- no hardcoded location.
+    assert os.path.basename(zip_path) == "risk_run_2026-08-05T09_15_00.123456.zip"
+    assert os.path.isfile(zip_path)
+    assert os.path.dirname(zip_path) == at.session_state["export_temp_dir"]
+
+    # The offered file is the real archive, carrying the run's files and the
+    # charts named for the two stages this profile has.
+    import zipfile
+
+    with zipfile.ZipFile(at.session_state["export_zip_path"]) as archive:
+        names = archive.namelist()
+    root = "risk_run_2026-08-05T09_15_00.123456"
+    assert f"{root}/metadata.json" in names
+    assert f"{root}/charts/TLR-TEST_Median_profile_Pre-mitigation.png" in names
+    assert f"{root}/charts/TLR-TEST_Median_profile_No_Loop.png" in names
+    assert f"{root}/charts/TLR-TEST_Median_profile_Post-mitigation.png" not in names
+
+
+def test_export_failure_surfaces_as_an_error_and_offers_no_download():
+    # save_dir has no metadata.json (and does not exist at all), so the export
+    # must fail loudly rather than hand over a summary-free zip.
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.session_state["run_result"] = _chart_result({})
+    at.run()
+    _export_buttons(at)[0].click().run()
+
+    assert not at.exception
+    assert any("export failed" in e.value.lower() for e in at.error)
+    assert not at.download_button
+
+
+def test_export_reports_the_charts_it_skipped(tmp_path, stub_summary_writer):
+    save_dir = _fake_save_dir(tmp_path)
+    fake_result = RunResult(
+        save_dir=save_dir,
+        risk_dir_results=[
+            RiskDirRunResult("TLR-TEST", _make_fake_assessment(), [], {
+                "Simulation-Configuration-TLR-TEST_Median_profile.json": {
+                    "pre-Loop_NoMitigations_t1_median": "/does/not/exist.tsv",
+                },
+            })
+        ],
+        cancelled=False,
+    )
+    at = AppTest.from_file("streamlit_app.py", default_timeout=120)
+    at.session_state["run_result"] = fake_result
+    at.run()
+    _export_buttons(at)[0].click().run()
+
+    assert not at.exception
+    skipped_warnings = [w.value for w in at.warning if "not exported" in w.value]
+    assert len(skipped_warnings) == 1
+    # The unreadable stage names the file and stays distinguishable from the two
+    # stages that simply have no trace.
+    assert "could not render exist.tsv" in skipped_warnings[0]
+    assert skipped_warnings[0].count("no simulation trace for this stage") == 2
+    # Skipped charts do not block the export of everything else.
+    assert len(at.download_button) == 1
+
+
+def test_export_chart_files_names_every_rendered_chart_by_tlr_profile_and_stage():
+    """Unit-level: the (filename, bytes) pairs handed to export_bundle.
+
+    Absent and unreadable stages are reported, never emitted as blank or
+    fabricated charts.
+    """
+    result = RiskDirRunResult("TLR-TEST", _make_fake_assessment(), [], {
+        "Simulation-Configuration-TLR-TEST_Median_profile.json": {
+            "pre-Loop_NoMitigations_t1_median": _PRE_TSV,
+            "pre-noLoop_t1_median": _NO_LOOP_TSV,
+            "post-Loop-WithMitigations_t1_median": "/does/not/exist.tsv",
+        },
+    })
+
+    charts, skipped = _export_chart_files(result)
+
+    assert [name for name, _ in charts] == [
+        "TLR-TEST_Median_profile_Pre-mitigation.png",
+        "TLR-TEST_Median_profile_No_Loop.png",
+    ]
+    assert all(png.startswith(b"\x89PNG\r\n\x1a\n") for _, png in charts)
+    assert len(skipped) == 1
+    assert "TLR-TEST / Median profile / Post-mitigation" in skipped[0]
+    assert "could not render exist.tsv" in skipped[0]
