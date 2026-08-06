@@ -127,7 +127,7 @@ def test_real_run_completes_end_to_end_through_the_launched_app():
     at.run()
 
     at.selectbox[0].select(REAL_COLLECTION).run()
-    at.radio[0].set_value("One specific directory").run()
+    at.radio(key="run_scope").set_value("One specific directory").run()
     tlr_selectbox = [sb for sb in at.selectbox if sb.label == "TLR-* directory"][0]
     tlr_selectbox.select(REAL_DIR_NAME).run()
 

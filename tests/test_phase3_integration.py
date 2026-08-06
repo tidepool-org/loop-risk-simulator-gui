@@ -176,7 +176,7 @@ def _select_collection(at, collection_name):
 
 
 def _select_single_directory(at, exact_dir_name):
-    at.radio[0].set_value("One specific directory").run()
+    at.radio(key="run_scope").set_value("One specific directory").run()
     tlr_selectbox = [sb for sb in at.selectbox if sb.label == "TLR-* directory"][0]
     tlr_selectbox.select(exact_dir_name).run()
 

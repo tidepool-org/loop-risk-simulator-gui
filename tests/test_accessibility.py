@@ -173,6 +173,45 @@ def test_css_override_text_on_secondary_background_meets_normal_text_contrast():
     )
 
 
+def test_every_value_box_widget_the_app_renders_is_covered_by_the_override():
+    """A widget whose value box sits on secondaryBackgroundColor must be in the
+    override, or its value renders in the page's default indigo ON that indigo box
+    -- #281946 on #281946, a 1:1 invisible field.
+
+    Found for real: TRSET-9's meal/bolus editor introduced st.time_input, which was
+    not in the list. The check is derived from what the app actually renders, so the
+    next new widget type is caught the same way rather than by inspection.
+
+    Scope: this asserts a rendered widget type is PRESENT in the override, not that
+    its selector actually reaches the value -- resolving the cascade needs a browser,
+    which this suite deliberately avoids. stTimeInput needed a second, different
+    selector (its value is a div inside a baseweb select, not an input); that it now
+    computes to #F5F5FA was verified in a running app, not here.
+    """
+    overridden = set(re.findall(r'\[data-testid="(st\w+)"\]', streamlit_app._BRAND_CSS))
+
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.run()
+    at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
+    assert not at.exception
+
+    # The widget types whose value renders inside a secondaryBackgroundColor box.
+    rendered = {
+        "stSelectbox": at.selectbox,
+        "stNumberInput": at.number_input,
+        "stTextInput": at.text_input,
+        "stTimeInput": at.time_input,
+        "stTextArea": at.text_area,
+    }
+    for testid, elements in rendered.items():
+        if not elements:
+            continue
+        assert testid in overridden, (
+            f"the app renders a {testid} whose value box is not in _BRAND_CSS's "
+            f"text-color override -- its value will be invisible on the indigo box"
+        )
+
+
 def test_primary_color_on_white_is_a_documented_known_finding_not_a_gate():
     # brand primaryColor (#627CFF ~3.6:1 on white) is BELOW the 4.5:1 normal-text
     # minimum but is excluded from the pass/fail gate per TRSET-4 adjudication

@@ -280,3 +280,72 @@ Regression risk Medium (GUI run path plus run-directory contents, which now also
 carry `metadata.json` and the RTFs); additive only — no existing field,
 signature, schema, or RTF byte changed — so this is not a breaking change and no
 rollback note applies.
+
+## Configurable meal entries (TRSET-9)
+
+**What changed (≤100 words):** The app gained a second config source. Alongside
+*Choose from the config library*, **Configure meals & boluses** lets a user define
+meal and bolus entries directly and generate four runnable scenario configs — one per
+T1 profile (Median, Resistant, Adolescent, Sensitive) — with `TLR-<YYYYMMDD-HHMMSS>`
+as the risk id. Meal values come from one of three modes: the per-profile standard,
+a 0.25-step multiplier of it, or one custom grams value. Generation lives in the new
+streamlit-free `meal_config.py`; `export_bundle` gained an optional
+`generated_configs` parameter. `gui_runner` is unchanged.
+
+Example:
+
+```bash
+streamlit run streamlit_app.py     # Config source -> Configure meals & boluses -> Generate configs -> Run Tool
+```
+
+The generated configs are written to a session temp directory laid out like the
+library (with `reusable/` symlinked so pointer resolution works as it does for a real
+collection) and handed to `run_risk_assessment` as its `config_dir` — the
+"configure parameters directly" mode `streamlit_app.py`'s docstring reserves.
+**Nothing is ever written into `scenario_configs/`.** They are downloadable on their
+own (`<risk_id>_configs.zip`, nested under one `<risk_id>/` folder) and ride along in
+the run export under `generated_configs/`.
+
+Generated configs use the library's own baseline template — the 2_0/swift base
+configs (`reusable.simulations.base_<profile>_2_0_v1`), `flat_110_12hr` glucose, and
+the post stage's `target_range_<profile>_v1` + `controller_settings_<profile>_swift`
+guardrails. Only `carb_entries` / `bolus_entries` come from the user. The three
+sim_ids (`pre-Loop_NoMitigations_`, `pre-noLoop_`, `post-Loop_WithMitigations_`) all
+classify through `severity_model.classify_sim_id`, so every stage reaches the results
+grid and the export.
+
+**Validation (≤100 words):** A single integration test drives the whole feature
+through the real app with no mocks: configure → generate → `validate_config_dir`
+(zero errors) → a real four-profile Swift run → export. It asserts at the boundaries —
+the JSON on disk, the `<sim_id>_override_config.json` files the run itself wrote, and
+the zip. Multiplier 2.0 really produced 62/66/120/50 g in the simulations; the
+duration-less meal really resolved to 180 minutes in the real parser; the No Loop
+stage really ran on its numeric bolus. 20 integration + 45 unit tests, ~53 s.
+Full GUI suite: 213 passed, 7 skipped.
+
+**Cautions / limitations:** Entries must fall inside the base configs' simulation
+window (`8/15/2019 12:00` + 8 h) — that window and the standard baselines
+(31/33/60/25 g) are **read** from the library at generation time, never hardcoded, so
+a library change flows straight through. `accept_recommendation` is written to
+`patient.patient_model` only: `ConfigValidator` rejects it under
+`patient.pump.bolus_entries`, where it would reach the Loop input JSON verbatim and
+crash the Swift bridge's `Double` decode. Because the No Loop stage has no controller
+to make a recommendation, any sentinel bolus must carry a numeric units value for
+that stage; a blank dose is an error, never a silent 0 U. The mode is per
+configuration but the value input is per meal row. Only settings/targets/schedules
+and the t2 profiles remain out of scope (later stages). The scenario-config schema,
+`scenario_json_parser_v2.py` and the Loop algorithm interface are untouched.
+Regression risk Medium (shares `validate_config_dir` / `run_risk_assessment` / the
+export control, and adds a second way to reach them); additive only — `gui_runner` is
+unchanged and `build_export_zip`'s new parameter is keyword-defaulted — so this is
+not a breaking change and no rollback note applies.
+
+**One TRSET-4 follow-through:** the editor introduced `st.time_input`, whose value
+box sits on `secondaryBackgroundColor` but was not in `_BRAND_CSS`'s text-color
+override — the entered time rendered `#281946` on `#281946`, an invisible field
+(found in a running app, not by inspection). It needed its own selector rather than
+the existing `role="group"`/`input` ones, because its value is a `div` inside a
+baseweb select. `test_accessibility.py` gained a guard that derives the widget types
+the app actually renders and fails if one is absent from the override; the guard was
+confirmed to fail without the fix. It checks presence, not cascade — resolving the
+cascade needs a browser, which that suite deliberately avoids.

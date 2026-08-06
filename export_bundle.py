@@ -25,6 +25,11 @@ from tidepool_data_science_simulator.projects.risk.gui_runner import (
 # profile x stage grid: only the filename carries identity (TRSET-7 scope).
 CHARTS_DIR_NAME = "charts"
 
+# GUI-generated scenario configs (TRSET-9) ride along in their own folder, so the
+# export records exactly which configs produced the results beside them. Empty for a
+# run started from the config library, whose configs are already in the library.
+GENERATED_CONFIGS_DIR_NAME = "generated_configs"
+
 # The run directory create_save_dir() makes is "Risk_Run_<ISO timestamp>"; the
 # export is named for the same timestamp so a downloaded zip is traceable back
 # to the run directory it came from.
@@ -78,10 +83,30 @@ def _tlr_dir_names(save_dir: str) -> list:
     )
 
 
+def _write_named_files(
+    archive: zipfile.ZipFile,
+    root: str,
+    folder: str,
+    files: Iterable[Tuple[str, bytes]],
+) -> None:
+    """Write ``(filename, bytes)`` pairs into ``<root>/<folder>/`` in the archive.
+
+    Raises ValueError on a duplicate filename rather than letting the second write
+    shadow the first, since the filename is the only identity these files carry.
+    """
+    written = set()
+    for filename, payload in files:
+        if filename in written:
+            raise ValueError(f"Two files in {folder}/ resolved to the same filename: {filename}")
+        written.add(filename)
+        archive.writestr(os.path.join(root, folder, filename), payload)
+
+
 def build_export_zip(
     save_dir: str,
     charts: Iterable[Tuple[str, bytes]],
     dest_dir: str,
+    generated_configs: Iterable[Tuple[str, bytes]] = (),
 ) -> str:
     """Write one zip of a completed run plus its charts, and return its path.
 
@@ -93,10 +118,14 @@ def build_export_zip(
     have to fit in memory.
 
     ``charts`` is ``(filename, png_bytes)`` pairs, already named by
-    ``chart_filename``. Raises ValueError if save_dir is missing metadata.json or
-    has no TLR-* directory (the two cases process_results_directory only prints
-    and returns on, which would otherwise yield a zip with no summaries), or if
-    two charts claim the same filename.
+    ``chart_filename``. ``generated_configs`` (TRSET-9) is ``(filename, json_bytes)``
+    pairs for a run started from GUI-generated configs, written under
+    ``generated_configs/``; it is empty for a run started from the config library.
+
+    Raises ValueError if save_dir is missing metadata.json or has no TLR-* directory
+    (the two cases process_results_directory only prints and returns on, which would
+    otherwise yield a zip with no summaries), or if two charts -- or two generated
+    configs -- claim the same filename.
     """
     if not os.path.isfile(os.path.join(save_dir, METADATA_FILENAME)):
         raise ValueError(
@@ -118,10 +147,6 @@ def build_export_zip(
                     file_path,
                     os.path.join(root, os.path.relpath(file_path, save_dir)),
                 )
-        written_charts = set()
-        for filename, png_bytes in charts:
-            if filename in written_charts:
-                raise ValueError(f"Two charts resolved to the same filename: {filename}")
-            written_charts.add(filename)
-            archive.writestr(os.path.join(root, CHARTS_DIR_NAME, filename), png_bytes)
+        _write_named_files(archive, root, CHARTS_DIR_NAME, charts)
+        _write_named_files(archive, root, GENERATED_CONFIGS_DIR_NAME, generated_configs)
     return zip_path

@@ -10,15 +10,17 @@ temp directory with no changes required there.
 """
 
 import base64
+import datetime
+import io
 import os
 import tempfile
 import threading
+import zipfile
 
 import pandas as pd
 import streamlit as st
 from streamlit.runtime.scriptrunner import add_script_run_ctx
 
-from tidepool_data_science_simulator.utils import PROJECT_ROOT_DIR
 from tidepool_data_science_simulator.trace import TraceReadError, read_trace
 # gui_runner is the single validated entry point for simulator behavior, and it
 # re-exports severity_model's stage identity (classify_sim_id / STAGE_ORDER /
@@ -36,6 +38,10 @@ from loop_home_renderer import render_loop_home_screen
 # Zip/RTF assembly for the export (TRSET-7). Kept out of this module so the view
 # layer stays presentation-only, per this file's docstring.
 from export_bundle import build_export_zip, chart_filename
+# Scenario-config generation from GUI-authored meal/bolus entries (TRSET-9). Same
+# reasoning as export_bundle: streamlit-free, so the generated JSON is asserted
+# directly rather than through AppTest.
+import meal_config
 
 # Root of the config library the selector browses. Defaults to the simulator's
 # in-tree scenario_configs (correct for an editable/sibling install). Under the
@@ -44,12 +50,12 @@ from export_bundle import build_export_zip, chart_filename
 # ship (it isn't part of the installed package) -- the bundle launcher sets
 # LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT to the vendored subtree instead. Same env
 # seam the integration tests use to point at a temp fixture root. Unset -> today's
-# behavior, so editable/dev checkouts are unaffected.
-_scenario_configs_root = os.environ.get("LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT")
-if _scenario_configs_root:
-    LIBRARY_ROOT = os.path.join(_scenario_configs_root, "tidepool_risk_v2", "loop_risk_v2_0")
-else:
-    LIBRARY_ROOT = os.path.join(PROJECT_ROOT_DIR, "scenario_configs", "tidepool_risk_v2", "loop_risk_v2_0")
+# behavior, so editable/dev checkouts are unaffected. The resolution itself lives in
+# meal_config (TRSET-9) so this module and the generator cannot disagree about
+# where the library is.
+LIBRARY_ROOT = os.path.join(
+    meal_config.scenario_configs_root(), "tidepool_risk_v2", "loop_risk_v2_0"
+)
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Tidepool_Logo_Light_Large_3000.jpg")
 
 # Logo sizing. We render an explicitly-sized HTML <img> rather than st.logo
@@ -236,6 +242,342 @@ def _render_profile_charts(result) -> None:
                 _render_stage_chart(stage_paths.get(stage))
 
 
+# ---------------------------------------------------------------------------
+# TRSET-9: configure meal and bolus entries, and generate configs from them
+# ---------------------------------------------------------------------------
+
+SOURCE_LIBRARY = "Choose from the config library"
+SOURCE_CONFIGURE = "Configure meals & boluses"
+
+# Display label -> meal_config mode. The modes are mutually exclusive and chosen
+# once for the whole configuration.
+MODE_LABELS = {
+    "Standard meal": meal_config.MODE_STANDARD,
+    "Multiplier of standard": meal_config.MODE_MULTIPLIER,
+    "Custom carb value": meal_config.MODE_CUSTOM,
+}
+
+BOLUS_UNITS_CHOICE = "Units"
+BOLUS_ACCEPT_CHOICE = "Accept Loop's recommendation"
+
+# Why the pump timeline never carries the sentinel -- stated in the UI rather than
+# silently dropped, since a user who typed it deserves to know where it went.
+PUMP_SENTINEL_NOTE = (
+    f"`{meal_config.ACCEPT_RECOMMENDATION}` is a patient-side value: it is written to "
+    "the patient model only, never to the pump timeline, which the Loop bridge reads "
+    "verbatim. The No Loop stage has no controller to make a recommendation, so it "
+    "uses the numeric units given alongside it."
+)
+
+MAX_ENTRIES = 10
+
+
+def _meal_entry_rows(key_prefix: str, mode: str, count: int, window_start) -> list:
+    """Render `count` meal rows and return them as MealEntry objects.
+
+    Every widget carries a full label (WCAG 1.3/2.1, guarded by the TRSET-4 tests),
+    so the row index is part of the label rather than only a column header. Leaving
+    the absorption duration blank omits it from the config entirely, which is what
+    selects the parser's own default.
+    """
+    entries = []
+    for index in range(count):
+        time_column, duration_column, value_column = st.columns(3)
+        with time_column:
+            start_time = st.time_input(
+                f"Meal {index + 1} start time",
+                value=window_start,
+                step=datetime.timedelta(minutes=5),
+                key=f"{key_prefix}_meal_time_{index}",
+            )
+        with duration_column:
+            duration = st.number_input(
+                f"Meal {index + 1} absorption (minutes)",
+                min_value=1,
+                max_value=int(meal_config.CARB_DURATION_MINUTES_MAX),
+                value=None,
+                step=15,
+                placeholder=f"default {meal_config.DEFAULT_CARB_DURATION_MINUTES}",
+                key=f"{key_prefix}_meal_duration_{index}",
+            )
+        with value_column:
+            if mode == meal_config.MODE_MULTIPLIER:
+                value_input = st.number_input(
+                    f"Meal {index + 1} multiplier of standard",
+                    min_value=meal_config.MULTIPLIER_STEP,
+                    value=1.0,
+                    step=meal_config.MULTIPLIER_STEP,
+                    key=f"{key_prefix}_meal_multiplier_{index}",
+                )
+            elif mode == meal_config.MODE_CUSTOM:
+                value_input = st.number_input(
+                    f"Meal {index + 1} carbs (g)",
+                    min_value=1.0,
+                    max_value=meal_config.CARB_GRAMS_MAX,
+                    value=30.0,
+                    step=1.0,
+                    key=f"{key_prefix}_meal_grams_{index}",
+                )
+            else:
+                value_input = None
+                st.caption(f"Meal {index + 1}: per-profile standard")
+        entries.append(meal_config.MealEntry(start_time, duration, value_input))
+    return entries
+
+
+def _bolus_entry_rows(key_prefix: str, count: int, window_start, allow_sentinel: bool) -> list:
+    """Render `count` bolus rows and return them as BolusEntry objects.
+
+    ``allow_sentinel`` is False for an independently-configured pump timeline: the
+    sentinel is invalid there (see PUMP_SENTINEL_NOTE), so it is not offered rather
+    than offered and then discarded.
+    """
+    entries = []
+    for index in range(count):
+        time_column, kind_column, value_column = st.columns(3)
+        with time_column:
+            bolus_time = st.time_input(
+                f"Bolus {index + 1} time",
+                value=window_start,
+                step=datetime.timedelta(minutes=5),
+                key=f"{key_prefix}_bolus_time_{index}",
+            )
+        with kind_column:
+            kind = (
+                st.selectbox(
+                    f"Bolus {index + 1} value type",
+                    options=[BOLUS_ACCEPT_CHOICE, BOLUS_UNITS_CHOICE],
+                    key=f"{key_prefix}_bolus_kind_{index}",
+                )
+                if allow_sentinel
+                else BOLUS_UNITS_CHOICE
+            )
+        with value_column:
+            # No default: a dose is never guessed on the user's behalf. Left blank,
+            # generation fails with a message naming the entry rather than quietly
+            # running a 0 U bolus.
+            units = st.number_input(
+                f"Bolus {index + 1} units"
+                + (" (No Loop stage)" if kind == BOLUS_ACCEPT_CHOICE else ""),
+                min_value=0.0,
+                max_value=meal_config.BOLUS_UNITS_MAX,
+                value=None,
+                step=0.1,
+                placeholder="units",
+                key=f"{key_prefix}_bolus_units_{index}",
+            )
+        if kind == BOLUS_ACCEPT_CHOICE:
+            entries.append(
+                meal_config.BolusEntry(
+                    bolus_time, meal_config.ACCEPT_RECOMMENDATION, no_loop_units=units
+                )
+            )
+        else:
+            entries.append(meal_config.BolusEntry(bolus_time, units))
+    return entries
+
+
+def _entry_set_editor(key_prefix: str, heading: str, mode: str, window_start, allow_sentinel: bool):
+    """One timeline's worth of entries: the meal rows and the bolus rows."""
+    st.markdown(f"**{heading}**")
+    meal_count = st.number_input(
+        f"{heading}: number of meal entries",
+        min_value=0,
+        max_value=MAX_ENTRIES,
+        value=1,
+        step=1,
+        key=f"{key_prefix}_meal_count",
+    )
+    meals = _meal_entry_rows(key_prefix, mode, int(meal_count), window_start)
+    bolus_count = st.number_input(
+        f"{heading}: number of bolus entries",
+        min_value=0,
+        max_value=MAX_ENTRIES,
+        value=1,
+        step=1,
+        key=f"{key_prefix}_bolus_count",
+    )
+    boluses = _bolus_entry_rows(key_prefix, int(bolus_count), window_start, allow_sentinel)
+    return meal_config.EntrySet(meals, boluses)
+
+
+def _reset_generated_state() -> None:
+    """Drop any generated configs, so a stale set is never run or downloaded."""
+    st.session_state.generated_config_dir = None
+    st.session_state.generated_risk_id = None
+    st.session_state.generated_configs = None
+    st.session_state.generated_error = None
+
+
+def _generated_temp_dir() -> str:
+    """Session-scoped temp root the generated config library is written under.
+
+    Created once per session and reused; nothing is ever written into the real
+    scenario-config library.
+    """
+    if st.session_state.generated_temp_dir is None:
+        st.session_state.generated_temp_dir = tempfile.mkdtemp(prefix="risk_configs_")
+    return st.session_state.generated_temp_dir
+
+
+def _generate_configs(spec) -> None:
+    """Generate the four configs for `spec` and write them to the temp library."""
+    generated_risk_id = meal_config.risk_id()
+    try:
+        configs = meal_config.generate_configs(spec, generated_risk_id)
+        config_dir = meal_config.write_config_library(
+            configs, generated_risk_id, _generated_temp_dir()
+        )
+    except (meal_config.MealConfigError, OSError) as exc:  # surfaced, never swallowed
+        _reset_generated_state()
+        st.session_state.generated_error = str(exc)
+    else:
+        st.session_state.generated_config_dir = config_dir
+        st.session_state.generated_risk_id = generated_risk_id
+        st.session_state.generated_configs = configs
+        st.session_state.generated_error = None
+        # A previous run's export must not be offered against a new config set.
+        _reset_export_state()
+
+
+def generated_configs_zip(configs: dict, generated_risk_id: str) -> bytes:
+    """The generated configs as one zip, nested under a single `<risk_id>/` folder.
+
+    Small enough (four JSON files) to assemble in memory, unlike the run export.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for filename, config in sorted(configs.items()):
+            archive.writestr(
+                os.path.join(generated_risk_id, filename), meal_config.config_bytes(config)
+            )
+    return buffer.getvalue()
+
+
+def _render_generated_summary() -> None:
+    """Report what was generated: the risk id, and the grams each profile resolved to."""
+    configs = st.session_state.generated_configs
+    generated_risk_id = st.session_state.generated_risk_id
+    st.success(f"Generated {len(configs)} config file(s) with risk id `{generated_risk_id}`.")
+
+    rows = []
+    for filename, config in sorted(configs.items()):
+        first_stage = config["override_config"][0]["patient"]["patient_model"]
+        rows.append({
+            "File": filename,
+            "Carbs (g)": ", ".join(
+                str(entry["value"]) for entry in first_stage["carb_entries"]
+            ) or "-",
+            "Boluses": ", ".join(
+                str(entry["value"]) for entry in first_stage["bolus_entries"]
+            ) or "-",
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+
+    st.download_button(
+        "Download configs (.zip)",
+        data=generated_configs_zip(configs, generated_risk_id),
+        file_name=f"{generated_risk_id}_configs.zip",
+        mime="application/zip",
+    )
+
+
+def _render_meal_config_editor():
+    """The meal/bolus editor. Returns (config_dir, target_risk_dir), or (None, None).
+
+    (None, None) until configs have been generated -- there is nothing to validate or
+    run before that.
+    """
+    st.markdown("### Meal and bolus configuration")
+    _, window_start, window_hours = meal_config.simulation_window()
+    window_end = (
+        datetime.datetime.combine(datetime.date.today(), window_start)
+        + datetime.timedelta(hours=window_hours)
+    ).time()
+    st.caption(
+        f"Entries must fall within the simulation window "
+        f"{window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} "
+        f"({window_hours:g} hours). Leaving absorption blank uses the simulator's "
+        f"{meal_config.DEFAULT_CARB_DURATION_MINUTES}-minute default."
+    )
+
+    mode_label = st.radio(
+        "Meal value", options=list(MODE_LABELS), horizontal=True, key="meal_mode"
+    )
+    mode = MODE_LABELS[mode_label]
+    if mode == meal_config.MODE_STANDARD:
+        st.caption(
+            "Standard per profile: "
+            + ", ".join(
+                f"{profile.display} {meal_config.standard_carb_grams(profile):g} g"
+                for profile in meal_config.PROFILES
+            )
+        )
+    elif mode == meal_config.MODE_MULTIPLIER:
+        st.caption(
+            f"Each profile's standard is scaled by the multiplier "
+            f"({meal_config.MULTIPLIER_STEP} increments)."
+        )
+    else:
+        st.caption("One carb value, applied identically to all four profiles.")
+
+    aligned = st.toggle(
+        "Use the same entries for the patient model and the pump",
+        value=True,
+        key="timelines_aligned",
+    )
+    st.caption(PUMP_SENTINEL_NOTE)
+
+    patient_entries = _entry_set_editor(
+        "pm", "Patient model", mode, window_start, allow_sentinel=True
+    )
+    if aligned:
+        spec = meal_config.MealConfigSpec.aligned(mode, patient_entries)
+    else:
+        pump_entries = _entry_set_editor(
+            "pump", "Pump", mode, window_start, allow_sentinel=False
+        )
+        spec = meal_config.MealConfigSpec(mode, patient_entries, pump_entries)
+
+    if st.button("Generate configs"):
+        _generate_configs(spec)
+
+    if st.session_state.generated_error is not None:
+        st.error(f"Could not generate configs: {st.session_state.generated_error}")
+        return None, None
+    if st.session_state.generated_configs is None:
+        st.info("Generate configs to validate and run them.")
+        return None, None
+
+    _render_generated_summary()
+    return st.session_state.generated_config_dir, st.session_state.generated_risk_id
+
+
+def _render_library_selector():
+    """Today's library browsing. Returns (config_dir, target_risk_dir)."""
+    collections = _list_collections()
+    if not collections:
+        st.error(f"No scenario config collections found under {LIBRARY_ROOT}")
+        return None, None
+
+    collection = st.selectbox("Config collection", options=collections, key="config_collection")
+    config_dir = os.path.join(LIBRARY_ROOT, collection)
+
+    tlr_dirs = _list_tlr_dirs(config_dir)
+    # Keyed so tests address it by name: it is no longer the app's first radio now
+    # that the config source precedes it.
+    scope_choice = st.radio(
+        "Run scope",
+        options=["All directories in this collection", "One specific directory"],
+        horizontal=True,
+        key="run_scope",
+    )
+    target_risk_dir = None
+    if scope_choice == "One specific directory":
+        target_risk_dir = st.selectbox("TLR-* directory", options=tlr_dirs)
+    return config_dir, target_risk_dir
+
+
 def _reset_export_state() -> None:
     """Drop any built export, so it is never offered against a different run."""
     st.session_state.export_zip_path = None
@@ -310,7 +652,15 @@ def _build_export(run_result) -> None:
             dir_charts, dir_skipped = _export_chart_files(risk_dir_result)
             charts.extend(dir_charts)
             skipped.extend(dir_skipped)
-        zip_path = build_export_zip(run_result.save_dir, charts, _export_temp_dir())
+        zip_path = build_export_zip(
+            run_result.save_dir,
+            charts,
+            _export_temp_dir(),
+            # TRSET-9: a run started from generated configs ships them alongside its
+            # results, so the export records exactly what was run. Empty for a run
+            # started from the library, which has no generated configs.
+            generated_configs=st.session_state.run_generated_configs,
+        )
     except Exception as exc:  # surfaced in the UI -- never swallowed
         _reset_export_state()
         st.session_state.export_error = str(exc)
@@ -366,6 +716,17 @@ def _init_session_state():
         "export_zip_path": None,
         "export_skipped": [],
         "export_error": None,
+        # Generated-config state (TRSET-9). Held across reruns because generating
+        # and then running are separate interactions.
+        "generated_temp_dir": None,
+        "generated_config_dir": None,
+        "generated_risk_id": None,
+        "generated_configs": None,
+        "generated_error": None,
+        # The configs the CURRENT run was started from, as (filename, bytes) --
+        # snapshotted at run start so the export ships what actually ran, even if
+        # the editor has since been changed. Empty for a library run.
+        "run_generated_configs": (),
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -378,6 +739,15 @@ def _start_run(config_dir, target_risk_dir):
     st.session_state.progress = None
     st.session_state.run_result = None
     st.session_state.run_error = None
+    generated = st.session_state.generated_configs
+    st.session_state.run_generated_configs = (
+        tuple(
+            (filename, meal_config.config_bytes(config))
+            for filename, config in sorted(generated.items())
+        )
+        if generated is not None and config_dir == st.session_state.generated_config_dir
+        else ()
+    )
     # A previous run's export must not be offered against the new run.
     _reset_export_state()
 
@@ -513,16 +883,27 @@ _BRAND_CSS = """
 
 /* Their label stays on the page background and must keep the default dark
    text, so only the value box (input/select + its role="group" wrapper)
-   gets the light override, not the whole widget. */
+   gets the light override, not the whole widget.
+
+   stTimeInput joined the list with TRSET-9's meal/bolus editor: without it the
+   entered time renders in the page's default indigo on the indigo value box --
+   #281946 on #281946, invisible (verified in a running app). It needs its own
+   selector rather than the role="group" one: it is a baseweb select whose value
+   sits in a plain div, not an input, so neither the group nor the input selector
+   reaches it. The label is a sibling stWidgetLabel, so this still leaves the label
+   on the page background with its default dark text. */
 [data-testid="stSelectbox"] div[role="group"],
 [data-testid="stMultiSelect"] div[role="group"],
 [data-testid="stTextInput"] div[role="group"],
 [data-testid="stNumberInput"] div[role="group"],
 [data-testid="stTextArea"] div[role="group"],
+[data-testid="stTimeInput"] div[data-baseweb="select"],
+[data-testid="stTimeInput"] [data-testid="stTimeInputTimeDisplay"],
 [data-testid="stSelectbox"] input,
 [data-testid="stMultiSelect"] input,
 [data-testid="stTextInput"] input,
 [data-testid="stNumberInput"] input,
+[data-testid="stTimeInput"] input,
 [data-testid="stTextArea"] textarea {
     color: #F5F5FA;
 }
@@ -577,21 +958,19 @@ def main():
         "virtual-patient scenarios, summarizing the glycemic and DKA risk metrics for each."
     )
 
-    collections = _list_collections()
-    if not collections:
-        st.error(f"No scenario config collections found under {LIBRARY_ROOT}")
-        return
-
-    collection = st.selectbox("Config collection", options=collections)
-    config_dir = os.path.join(LIBRARY_ROOT, collection)
-
-    tlr_dirs = _list_tlr_dirs(config_dir)
-    scope_choice = st.radio(
-        "Run scope", options=["All directories in this collection", "One specific directory"], horizontal=True
+    config_source = st.radio(
+        "Config source",
+        options=[SOURCE_LIBRARY, SOURCE_CONFIGURE],
+        horizontal=True,
+        key="config_source",
     )
-    target_risk_dir = None
-    if scope_choice == "One specific directory":
-        target_risk_dir = st.selectbox("TLR-* directory", options=tlr_dirs)
+    if config_source == SOURCE_LIBRARY:
+        config_dir, target_risk_dir = _render_library_selector()
+    else:
+        config_dir, target_risk_dir = _render_meal_config_editor()
+
+    if config_dir is None:
+        return
 
     validation_result = validate_config_dir(config_dir, target_risk_dir)
     if validation_result.errors_by_file:
