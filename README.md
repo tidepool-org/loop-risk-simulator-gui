@@ -364,3 +364,38 @@ always matches the current selection or is empty. It is deliberately keyed on th
 selection changing rather than on any rerun happening: the rerun that follows a run
 completing must not wipe the run that just finished. Skipped while a run is in flight,
 since that run owns the state and has nothing displayed yet.
+
+## Empty carb panel on a No Loop stage (TRSET-9 follow-up, renderer)
+
+**What changed (≤100 words):** Two fixes in `loop_home_renderer.py`. (1) `loop_cob`
+is the **Loop algorithm's** carbs-on-board estimate, so it is absent on a stage that
+runs no controller (`pre-noLoop_*`, `controller: null`); the renderer drew an
+invisible all-NaN line and still legended it "Carbs on board", which reads as *this
+scenario had no carbs*. The line and its legend entry are now omitted there and an
+in-panel note says why. (2) x-limits are pinned to the data span, so an event at
+simulation t=0 sat **on** the left spine with half its glyph outside the axes; carb
+and dose markers now draw unclipped.
+
+Example:
+
+```bash
+python -m pytest tests/test_loop_home_renderer.py     # arm64 conda env, never `uv run`
+```
+
+**Validation (≤100 words):** Diagnosed against a real run: the No Loop trace carries
+the same carb events as the Loop stages (`true_carb_value` populated on all three;
+`loop_cob` 97 points on the Loop stages, 0 on No Loop), and its glucose runs
+110 → ~475 mg/dL — the meal absorbing unopposed. Marker position measured at fraction
+`0.0000` across the axis. Seven unit tests added, each mutation-checked: reverting
+either fix fails exactly the tests that assert it. A populated-but-all-zero `loop_cob`
+is deliberately still treated as computed. Full GUI suite: 228 passed, 7 skipped.
+
+**Cautions / limitations:** There is no non-Loop COB series to substitute —
+`SimulationTrace` exposes only `loop_cob`, and the TSV's other carb columns are the
+discrete entry values/durations. So the No Loop panel shows carb-entry markers and the
+note, never a curve. Deriving a patient-side COB would mean modelling absorption in
+the view layer, which this deliberately does not do. `clip_on=False` lets a boundary
+marker overhang the axes by half a glyph; that is the intent (the alternative, padding
+the x-limits, would reintroduce the empty forward gutter TRSET-22 removed). This
+touches the TRSET-22/23 renderer, not TRSET-9 code — the clipping predates this
+branch; TRSET-9 only made it prominent by defaulting meals to simulation start.
