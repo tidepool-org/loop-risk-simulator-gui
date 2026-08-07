@@ -729,3 +729,79 @@ def test_the_config_download_zip_nests_under_one_folder():
         names = archive.namelist()
     assert len(names) == 4
     assert all(name.startswith("TLR-20260806-143000/") for name in names)
+
+
+# ---------------------------------------------------------------------------
+# A run's results must not outlive the selection behind them (TRSET-9 follow-up)
+# ---------------------------------------------------------------------------
+
+class _StubThread:
+    """Stands in for a live run thread -- only is_alive() is consulted."""
+
+    def __init__(self, alive):
+        self._alive = alive
+
+    def is_alive(self):
+        return self._alive
+
+
+def _app_with_completed_run():
+    """An app showing a completed library run, the way a user leaves one on screen."""
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.session_state["run_result"] = RunResult(
+        save_dir="/tmp/Risk_Run_x",
+        risk_dir_results=[RiskDirRunResult("TLR-1117_bike", _make_fake_assessment(), [], {})],
+    )
+    at.run()
+    return at
+
+
+def test_a_completed_run_renders_until_something_invalidates_it():
+    """Guards the two tests below against passing vacuously."""
+    at = _app_with_completed_run()
+
+    assert at.session_state["run_result"] is not None
+    assert any(e.label == "TLR-1117_bike" for e in at.expander)
+
+
+def test_switching_config_source_clears_the_previous_sources_results():
+    at = _app_with_completed_run()
+    at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
+
+    assert at.session_state["run_result"] is None
+    assert not [e for e in at.expander if e.label == "TLR-1117_bike"]
+
+
+def test_generating_configs_clears_a_previous_runs_results():
+    """A previous run's charts under a new config set read as that set's output."""
+    at = _app_with_completed_run()
+    at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
+    # Put a run back, as if the user had run from this source and then re-generated.
+    at.session_state["run_result"] = RunResult(
+        save_dir="/tmp/Risk_Run_y",
+        risk_dir_results=[RiskDirRunResult("TLR-OLD", _make_fake_assessment(), [], {})],
+    )
+    at.number_input(key="pm_bolus_units_0").set_value(3.3).run()
+    assert at.session_state["run_result"] is not None, "precondition"
+
+    [b for b in at.button if b.label == "Generate configs"][0].click().run()
+
+    assert at.session_state["generated_configs"] is not None
+    assert at.session_state["run_result"] is None
+    assert not [e for e in at.expander if e.label == "TLR-OLD"]
+
+
+def test_a_run_in_flight_is_never_clobbered_by_a_source_switch():
+    """The in-flight run owns that state and has no results displayed yet."""
+    in_flight = RunResult(
+        save_dir="/tmp/Risk_Run_inflight",
+        risk_dir_results=[RiskDirRunResult("TLR-INFLIGHT", _make_fake_assessment(), [], {})],
+    )
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.session_state["run_thread"] = _StubThread(alive=True)
+    at.session_state["run_result"] = in_flight
+    at.run()
+
+    at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
+
+    assert at.session_state["run_result"] is in_flight

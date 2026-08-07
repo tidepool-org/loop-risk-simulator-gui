@@ -349,3 +349,15 @@ baseweb select. `test_accessibility.py` gained a guard that derives the widget t
 the app actually renders and fails if one is absent from the override; the guard was
 confirmed to fail without the fix. It checks presence, not cascade — resolving the
 cascade needs a browser, which that suite deliberately avoids.
+
+**Post-release fix — results never outlive their selection:** as first shipped, the
+results pane rendered unconditionally at the bottom of the page, so a previous run's
+expanders and charts stayed on screen after switching config source or generating a
+new config set. That misled in practice: a library physical-activity directory
+(`TLR-1117_bike` — no meals, so an empty Active Carbohydrates panel by construction)
+was still displayed under a freshly generated meal configuration and read as that
+configuration's output. Generating configs, and switching config source, now clear
+the displayed run — skipped while a run is in flight, since that run owns the state
+and has nothing displayed yet. **Known limitation:** changing the library collection
+or TLR-* directory has the same staleness; that predates this feature and is flagged
+separately, not fixed here.

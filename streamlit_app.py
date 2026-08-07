@@ -409,6 +409,27 @@ def _reset_generated_state() -> None:
     st.session_state.generated_error = None
 
 
+def _reset_run_state() -> None:
+    """Drop a completed run's results, so they never outlive the selection behind them.
+
+    The results pane renders unconditionally at the bottom of the page. Without this,
+    a previous run's expanders and charts sit underneath a freshly generated config
+    set and read as that set's output -- a real misdiagnosis this shipped with: a
+    library physical-activity directory (no meals, so an empty carb panel by
+    construction) was still on screen after generating a meal configuration.
+
+    Skipped while a run is in flight: that run owns this state, and it has no results
+    displayed yet to be stale.
+    """
+    thread = st.session_state.run_thread
+    if thread is not None and thread.is_alive():
+        return
+    st.session_state.run_result = None
+    st.session_state.run_error = None
+    st.session_state.progress = None
+    _reset_export_state()
+
+
 def _generated_temp_dir() -> str:
     """Session-scoped temp root the generated config library is written under.
 
@@ -436,8 +457,8 @@ def _generate_configs(spec) -> None:
         st.session_state.generated_risk_id = generated_risk_id
         st.session_state.generated_configs = configs
         st.session_state.generated_error = None
-        # A previous run's export must not be offered against a new config set.
-        _reset_export_state()
+        # A previous run's results and export must not sit under a new config set.
+        _reset_run_state()
 
 
 def generated_configs_zip(configs: dict, generated_risk_id: str) -> bytes:
@@ -723,6 +744,11 @@ def _init_session_state():
         "generated_risk_id": None,
         "generated_configs": None,
         "generated_error": None,
+        # The config source the page last rendered for, so a switch can be detected
+        # and the previous source's results cleared. Seeded with the radio's own
+        # default so a first render is never mistaken for a switch -- otherwise the
+        # very first pass would clear results a caller had just handed the session.
+        "last_config_source": SOURCE_LIBRARY,
         # The configs the CURRENT run was started from, as (filename, bytes) --
         # snapshotted at run start so the export ships what actually ran, even if
         # the editor has since been changed. Empty for a library run.
@@ -964,6 +990,12 @@ def main():
         horizontal=True,
         key="config_source",
     )
+    # Switching source changes what a run would be OF, so anything already on the
+    # page belongs to the other source and must not stay under the new one.
+    if st.session_state.last_config_source != config_source:
+        st.session_state.last_config_source = config_source
+        _reset_run_state()
+
     if config_source == SOURCE_LIBRARY:
         config_dir, target_risk_dir = _render_library_selector()
     else:
