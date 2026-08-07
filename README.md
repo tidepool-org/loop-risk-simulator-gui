@@ -356,8 +356,11 @@ expanders and charts stayed on screen after switching config source or generatin
 new config set. That misled in practice: a library physical-activity directory
 (`TLR-1117_bike` — no meals, so an empty Active Carbohydrates panel by construction)
 was still displayed under a freshly generated meal configuration and read as that
-configuration's output. Generating configs, and switching config source, now clear
-the displayed run — skipped while a run is in flight, since that run owns the state
-and has nothing displayed yet. **Known limitation:** changing the library collection
-or TLR-* directory has the same staleness; that predates this feature and is flagged
-separately, not fixed here.
+configuration's output. The displayed run is now cleared whenever the
+selection behind it changes — switching config source, generating a new config set,
+or picking another collection or TLR-* directory. One check (`_sync_selection`) covers
+every case, keyed on `(config source, config dir, target TLR dir)`, so the results pane
+always matches the current selection or is empty. It is deliberately keyed on the
+selection changing rather than on any rerun happening: the rerun that follows a run
+completing must not wipe the run that just finished. Skipped while a run is in flight,
+since that run owns the state and has nothing displayed yet.

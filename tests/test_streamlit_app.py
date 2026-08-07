@@ -805,3 +805,47 @@ def test_a_run_in_flight_is_never_clobbered_by_a_source_switch():
     at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
 
     assert at.session_state["run_result"] is in_flight
+
+
+def test_changing_the_config_collection_clears_the_previous_runs_results():
+    at = _app_with_completed_run()
+    current = at.selectbox(key="config_collection").value
+    other = [o for o in at.selectbox(key="config_collection").options if o != current][0]
+
+    at.selectbox(key="config_collection").select(other).run()
+
+    assert at.session_state["run_result"] is None
+    assert not [e for e in at.expander if e.label == "TLR-1117_bike"]
+
+
+def test_changing_the_target_tlr_directory_clears_the_previous_runs_results():
+    """The narrower case: same collection, different directory."""
+    at = _app_with_completed_run()
+    at.radio(key="run_scope").set_value("One specific directory").run()
+    # Scope itself changed the selection, so put a run back before the real check.
+    at.session_state["run_result"] = RunResult(
+        save_dir="/tmp/Risk_Run_z",
+        risk_dir_results=[RiskDirRunResult("TLR-FIRST", _make_fake_assessment(), [], {})],
+    )
+    at.run()
+    assert at.session_state["run_result"] is not None, "precondition"
+
+    tlr_selectbox = [sb for sb in at.selectbox if sb.label == "TLR-* directory"][0]
+    other = [o for o in tlr_selectbox.options if o != tlr_selectbox.value][0]
+    tlr_selectbox.select(other).run()
+
+    assert at.session_state["run_result"] is None
+    assert not [e for e in at.expander if e.label == "TLR-FIRST"]
+
+
+def test_a_rerun_that_changes_nothing_keeps_the_results_on_screen():
+    """The reset is keyed on the selection changing, not on any rerun happening --
+    otherwise the rerun after a run completes would wipe the run that just finished."""
+    at = _app_with_completed_run()
+    assert at.session_state["run_result"] is not None
+
+    at.run()
+    at.run()
+
+    assert at.session_state["run_result"] is not None
+    assert any(e.label == "TLR-1117_bike" for e in at.expander)
