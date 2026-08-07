@@ -255,3 +255,114 @@ def test_shaping_drops_nan_and_zero_events():
     markers = renderer._shape_trace(trace).true_bolus
     assert markers.value.tolist() == [2.5]
     assert markers.time.size == 1
+
+
+# ---------------------------------------------------------------------------
+# An absent carbs-on-board series is stated, not left to be misread
+# ---------------------------------------------------------------------------
+
+def _carb_axis(trace):
+    fig = renderer.build_loop_home_figure(trace)
+    ax = fig.axes[2]
+    labels = ax.get_legend_handles_labels()[1]
+    notes = [t.get_text() for t in ax.texts]
+    plt.close(fig)
+    return labels, notes
+
+
+def test_absent_loop_cob_states_why_rather_than_legending_an_invisible_line():
+    """A No Loop stage has no COB estimate; legending one reads as "no carbs"."""
+    labels, notes = _carb_axis(_make_trace(loop_cob_all_nan=True))
+
+    assert "Carbs on board" not in labels, labels
+    assert renderer.NO_LOOP_COB_NOTE in notes, notes
+    # The carbs that DID happen are still shown, so the panel is not merely blank.
+    assert "Carb entry" in labels, labels
+
+
+def test_present_loop_cob_draws_the_line_and_adds_no_note():
+    labels, notes = _carb_axis(_make_trace())
+
+    assert "Carbs on board" in labels, labels
+    assert renderer.NO_LOOP_COB_NOTE not in notes, notes
+
+
+def test_a_populated_but_all_zero_loop_cob_counts_as_computed():
+    """Loop ran and its COB was genuinely 0 -- not the same as never computed."""
+    trace = _make_trace()
+    trace.loop_cob.iloc[:] = 0.0
+
+    labels, notes = _carb_axis(trace)
+
+    assert "Carbs on board" in labels, labels
+    assert renderer.NO_LOOP_COB_NOTE not in notes, notes
+
+
+def test_a_carb_only_no_loop_stage_still_renders_a_legend():
+    """Guards the empty-legend path: no COB line, but markers remain."""
+    png = renderer.render_loop_home_screen(_make_trace(loop_cob_all_nan=True))
+    assert png[:8] == _PNG_SIGNATURE
+
+
+def test_a_stage_with_neither_cob_nor_carb_events_renders_without_an_empty_legend():
+    trace = _make_trace(loop_cob_all_nan=True)
+    trace.true_carb_value.iloc[:] = np.nan
+    trace.reported_carb_value.iloc[:] = np.nan
+
+    fig = renderer.build_loop_home_figure(trace)
+    ax = fig.axes[2]
+    assert ax.get_legend() is None, "nothing to legend, so no empty legend box"
+    assert renderer.NO_LOOP_COB_NOTE in [t.get_text() for t in ax.texts]
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Events at the axis boundary
+# ---------------------------------------------------------------------------
+
+def _marker_artists(ax, *labels):
+    """The scatter artists for the named event series.
+
+    Selected by label rather than by collection type, so the IOB fill_between
+    polygon on the insulin axis -- which SHOULD stay clipped -- is never caught up
+    in an assertion about event markers.
+    """
+    return [c for c in ax.collections if c.get_label() in labels]
+
+
+def test_an_event_at_simulation_start_is_drawn_unclipped():
+    """x-limits are pinned to the data span (AC #3), so a t=0 event sits ON the
+    left spine and half its glyph falls outside the axes. A meal at simulation
+    start is the common case, and on a No Loop stage it is the panel's only
+    content -- clipped, it read as no carbs at all."""
+    trace = _make_trace(loop_cob_all_nan=True)
+    trace.true_carb_value.iloc[:] = np.nan
+    trace.reported_carb_value.iloc[:] = np.nan
+    trace.true_carb_value.iloc[0] = 60.0  # simulation t=0
+
+    fig = renderer.build_loop_home_figure(trace)
+    ax = fig.axes[2]
+    markers = _marker_artists(ax, "Carb entry")
+    assert markers, "the t=0 carb entry must be drawn"
+
+    left = ax.get_xlim()[0]
+    marker_x = markers[0].get_offsets()[0][0]
+    assert abs(marker_x - left) < 1e-6, "precondition: the event is on the left spine"
+    assert all(not c.get_clip_on() for c in markers)
+    plt.close(fig)
+
+
+def test_dose_markers_are_also_drawn_unclipped():
+    trace = _make_trace()
+    trace.true_bolus.iloc[:] = np.nan
+    trace.true_bolus.iloc[0] = 3.3  # simulation t=0
+
+    fig = renderer.build_loop_home_figure(trace)
+    ax = fig.axes[1]
+    markers = _marker_artists(ax, "Bolus", "Reported bolus")
+    assert markers
+    assert all(not c.get_clip_on() for c in markers)
+    # The IOB area is a different case: it must stay clipped to the axes.
+    iob_area = [c for c in ax.collections if c.get_label() == "Active insulin (IOB)"]
+    assert iob_area and all(c.get_clip_on() for c in iob_area)
+    plt.close(fig)

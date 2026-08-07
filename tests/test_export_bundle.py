@@ -214,5 +214,51 @@ def test_two_charts_claiming_one_filename_raise_rather_than_silently_overwrite(
         export_bundle.build_export_zip(save_dir, [duplicate, duplicate], str(tmp_path))
 
 
+# ---------------------------------------------------------------------------
+# GUI-generated scenario configs (TRSET-9)
+# ---------------------------------------------------------------------------
+
+GENERATED = [
+    ("Simulation-Configuration-TLR-20260806-143000_Median_Profile.json", b'{"median": 1}'),
+    ("Simulation-Configuration-TLR-20260806-143000_Sensitive_Profile.json", b'{"sensitive": 1}'),
+]
+
+
+def test_generated_configs_go_into_their_own_folder_with_their_bytes_intact(
+    save_dir, stub_summary_writer, tmp_path
+):
+    zip_path = export_bundle.build_export_zip(
+        save_dir, [], str(tmp_path), generated_configs=GENERATED
+    )
+
+    with zipfile.ZipFile(zip_path) as archive:
+        for filename, config_bytes in GENERATED:
+            archived = archive.read(
+                f"{EXPECTED_ROOT}/{export_bundle.GENERATED_CONFIGS_DIR_NAME}/{filename}"
+            )
+            assert archived == config_bytes
+
+
+def test_a_library_run_exports_no_generated_configs_folder(
+    save_dir, stub_summary_writer, tmp_path
+):
+    """The parameter defaults to empty, so today's library-run export is unchanged."""
+    zip_path = export_bundle.build_export_zip(save_dir, [], str(tmp_path))
+
+    assert not [
+        name for name in _archived_names(zip_path)
+        if export_bundle.GENERATED_CONFIGS_DIR_NAME in name
+    ]
+
+
+def test_two_generated_configs_claiming_one_filename_raise(
+    save_dir, stub_summary_writer, tmp_path
+):
+    with pytest.raises(ValueError, match="same filename"):
+        export_bundle.build_export_zip(
+            save_dir, [], str(tmp_path), generated_configs=[GENERATED[0], GENERATED[0]]
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

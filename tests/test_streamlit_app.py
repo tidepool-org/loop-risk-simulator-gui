@@ -9,8 +9,11 @@ real bad config, a real background run completing) are covered by the
 separately-approved Phase 3 integration test plan, not duplicated here.
 """
 
+import datetime
+import io
 import os
 import sys
+import zipfile
 
 import pytest
 
@@ -24,6 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tidepool_data_science_simulator.projects.risk.gui_runner import RunResult, RiskDirRunResult  # noqa: E402
 from severity_model import SeverityAssessment, StageResult  # noqa: E402
 from streamlit_app import _export_chart_files, _profile_label, _profile_stage_rows  # noqa: E402
+import meal_config  # noqa: E402
+import streamlit_app  # noqa: E402
 
 _TEST_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_data")
 # The two real captured run TSVs committed for TRSET-22: a 'pre' stage and a
@@ -100,7 +105,7 @@ def test_single_directory_scope_populates_tlr_selectbox():
     at = AppTest.from_file("streamlit_app.py", default_timeout=30)
     at.run()
     at.selectbox[0].select("loop_risk_v2_2_0_full").run()
-    at.radio[0].set_value("One specific directory").run()
+    at.radio(key="run_scope").set_value("One specific directory").run()
 
     assert not at.exception
     labels = [sb.label for sb in at.selectbox]
@@ -636,3 +641,211 @@ def test_export_chart_files_names_every_rendered_chart_by_tlr_profile_and_stage(
     assert len(skipped) == 1
     assert "TLR-TEST / Median profile / Post-mitigation" in skipped[0]
     assert "could not render exist.tsv" in skipped[0]
+
+
+# ---------------------------------------------------------------------------
+# The meal/bolus editor (TRSET-9)
+# ---------------------------------------------------------------------------
+
+def _editor_app():
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.run()
+    at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
+    return at
+
+
+def test_config_source_defaults_to_the_library_so_the_existing_flow_is_unchanged():
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.run()
+
+    assert at.radio(key="config_source").value == streamlit_app.SOURCE_LIBRARY
+    assert at.selectbox(key="config_collection") is not None
+    assert not [b for b in at.button if b.label == "Generate configs"]
+
+
+def test_the_editor_offers_no_run_until_configs_are_generated():
+    at = _editor_app()
+
+    assert [b.label for b in at.button] == ["Generate configs"]
+    assert any("Generate configs to validate and run" in i.value for i in at.info)
+
+
+def test_a_bolus_with_no_dose_reports_the_error_and_stays_unrunnable():
+    """A dose is never guessed: blank means blank, and generation says so."""
+    at = _editor_app()
+    at.button[0].click().run()
+
+    assert not at.exception
+    assert len(at.error) == 1
+    assert "needs a numeric units value" in at.error[0].value
+    assert not [b for b in at.button if b.label == "Run Tool"]
+    assert at.session_state["generated_configs"] is None
+
+
+def test_generating_configs_makes_them_downloadable_and_runnable():
+    at = _editor_app()
+    at.number_input(key="pm_bolus_units_0").set_value(3.3).run()
+    at.button[0].click().run()
+
+    assert not at.error, [e.value for e in at.error]
+    assert len(at.session_state["generated_configs"]) == 4
+    assert [d.label for d in at.download_button] == ["Download configs (.zip)"]
+    assert [b for b in at.button if b.label == "Run Tool"]
+
+
+def test_the_independent_pump_timeline_does_not_offer_the_patient_side_sentinel():
+    """It is invalid under patient.pump.bolus_entries, so it is never offered."""
+    at = _editor_app()
+    at.toggle(key="timelines_aligned").set_value(False).run()
+
+    kind_selectboxes = [sb for sb in at.selectbox if sb.label.endswith("value type")]
+    assert len(kind_selectboxes) == 1, [sb.label for sb in kind_selectboxes]
+    assert kind_selectboxes[0].key == "pm_bolus_kind_0"
+    assert any(label.startswith("Pump:") for label in
+               [n.label for n in at.number_input])
+
+
+def test_custom_mode_offers_a_grams_input_and_multiplier_mode_a_multiplier():
+    at = _editor_app()
+    at.radio(key="meal_mode").set_value("Custom carb value").run()
+    assert at.number_input(key="pm_meal_grams_0") is not None
+
+    at.radio(key="meal_mode").set_value("Multiplier of standard").run()
+    assert at.number_input(key="pm_meal_multiplier_0").step == meal_config.MULTIPLIER_STEP
+
+
+def test_the_config_download_zip_nests_under_one_folder():
+    configs = meal_config.generate_configs(
+        meal_config.MealConfigSpec.aligned(
+            meal_config.MODE_STANDARD,
+            meal_config.EntrySet(meals=[meal_config.MealEntry(datetime.time(12, 0))]),
+        ),
+        "TLR-20260806-143000",
+    )
+
+    payload = streamlit_app.generated_configs_zip(configs, "TLR-20260806-143000")
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        names = archive.namelist()
+    assert len(names) == 4
+    assert all(name.startswith("TLR-20260806-143000/") for name in names)
+
+
+# ---------------------------------------------------------------------------
+# A run's results must not outlive the selection behind them (TRSET-9 follow-up)
+# ---------------------------------------------------------------------------
+
+class _StubThread:
+    """Stands in for a live run thread -- only is_alive() is consulted."""
+
+    def __init__(self, alive):
+        self._alive = alive
+
+    def is_alive(self):
+        return self._alive
+
+
+def _app_with_completed_run():
+    """An app showing a completed library run, the way a user leaves one on screen."""
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.session_state["run_result"] = RunResult(
+        save_dir="/tmp/Risk_Run_x",
+        risk_dir_results=[RiskDirRunResult("TLR-1117_bike", _make_fake_assessment(), [], {})],
+    )
+    at.run()
+    return at
+
+
+def test_a_completed_run_renders_until_something_invalidates_it():
+    """Guards the two tests below against passing vacuously."""
+    at = _app_with_completed_run()
+
+    assert at.session_state["run_result"] is not None
+    assert any(e.label == "TLR-1117_bike" for e in at.expander)
+
+
+def test_switching_config_source_clears_the_previous_sources_results():
+    at = _app_with_completed_run()
+    at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
+
+    assert at.session_state["run_result"] is None
+    assert not [e for e in at.expander if e.label == "TLR-1117_bike"]
+
+
+def test_generating_configs_clears_a_previous_runs_results():
+    """A previous run's charts under a new config set read as that set's output."""
+    at = _app_with_completed_run()
+    at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
+    # Put a run back, as if the user had run from this source and then re-generated.
+    at.session_state["run_result"] = RunResult(
+        save_dir="/tmp/Risk_Run_y",
+        risk_dir_results=[RiskDirRunResult("TLR-OLD", _make_fake_assessment(), [], {})],
+    )
+    at.number_input(key="pm_bolus_units_0").set_value(3.3).run()
+    assert at.session_state["run_result"] is not None, "precondition"
+
+    [b for b in at.button if b.label == "Generate configs"][0].click().run()
+
+    assert at.session_state["generated_configs"] is not None
+    assert at.session_state["run_result"] is None
+    assert not [e for e in at.expander if e.label == "TLR-OLD"]
+
+
+def test_a_run_in_flight_is_never_clobbered_by_a_source_switch():
+    """The in-flight run owns that state and has no results displayed yet."""
+    in_flight = RunResult(
+        save_dir="/tmp/Risk_Run_inflight",
+        risk_dir_results=[RiskDirRunResult("TLR-INFLIGHT", _make_fake_assessment(), [], {})],
+    )
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.session_state["run_thread"] = _StubThread(alive=True)
+    at.session_state["run_result"] = in_flight
+    at.run()
+
+    at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
+
+    assert at.session_state["run_result"] is in_flight
+
+
+def test_changing_the_config_collection_clears_the_previous_runs_results():
+    at = _app_with_completed_run()
+    current = at.selectbox(key="config_collection").value
+    other = [o for o in at.selectbox(key="config_collection").options if o != current][0]
+
+    at.selectbox(key="config_collection").select(other).run()
+
+    assert at.session_state["run_result"] is None
+    assert not [e for e in at.expander if e.label == "TLR-1117_bike"]
+
+
+def test_changing_the_target_tlr_directory_clears_the_previous_runs_results():
+    """The narrower case: same collection, different directory."""
+    at = _app_with_completed_run()
+    at.radio(key="run_scope").set_value("One specific directory").run()
+    # Scope itself changed the selection, so put a run back before the real check.
+    at.session_state["run_result"] = RunResult(
+        save_dir="/tmp/Risk_Run_z",
+        risk_dir_results=[RiskDirRunResult("TLR-FIRST", _make_fake_assessment(), [], {})],
+    )
+    at.run()
+    assert at.session_state["run_result"] is not None, "precondition"
+
+    tlr_selectbox = [sb for sb in at.selectbox if sb.label == "TLR-* directory"][0]
+    other = [o for o in tlr_selectbox.options if o != tlr_selectbox.value][0]
+    tlr_selectbox.select(other).run()
+
+    assert at.session_state["run_result"] is None
+    assert not [e for e in at.expander if e.label == "TLR-FIRST"]
+
+
+def test_a_rerun_that_changes_nothing_keeps_the_results_on_screen():
+    """The reset is keyed on the selection changing, not on any rerun happening --
+    otherwise the rerun after a run completes would wipe the run that just finished."""
+    at = _app_with_completed_run()
+    assert at.session_state["run_result"] is not None
+
+    at.run()
+    at.run()
+
+    assert at.session_state["run_result"] is not None
+    assert any(e.label == "TLR-1117_bike" for e in at.expander)

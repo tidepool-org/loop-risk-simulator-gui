@@ -65,6 +65,13 @@ DPI = 100
 # the target band is a neutral periwinkle wash, never a clinical status signal.
 _INDIGO = "#281946"      # config.toml textColor / secondaryBackgroundColor
 _PERIWINKLE = "#627CFF"  # config.toml primaryColor
+
+# Shown in place of the carbs-on-board line on a stage that runs no controller.
+# Says why the line is absent rather than leaving a bare panel to be read as "no
+# carbs" -- the carb-entry markers, and the glucose rise above, are still there.
+NO_LOOP_COB_NOTE = (
+    "Carbs on board is a Loop estimate,\nnot computed on a stage that runs no controller"
+)
 _BAND_ALPHA = 0.15
 _AREA_ALPHA = 0.25
 _GRID_ALPHA = 0.3
@@ -239,35 +246,50 @@ def _draw(data: LoopHomeChartData):
     if data.true_bolus.time.size:
         ax_insulin.scatter(
             data.true_bolus.time, data.true_bolus.value, color=_INDIGO, marker="P",
-            s=60, zorder=3, label="Bolus",
+            s=60, zorder=3, label="Bolus", clip_on=False,
         )
     if data.reported_bolus.time.size:
         ax_insulin.scatter(
             data.reported_bolus.time, data.reported_bolus.value, color=_PERIWINKLE,
-            marker="X", s=50, zorder=3, label="Reported bolus",
+            marker="X", s=50, zorder=3, label="Reported bolus", clip_on=False,
         )
     _style_section(ax_insulin, "Active Insulin", "U / U per hr", _PERIWINKLE)
     ax_insulin.set_ylim(bottom=0)
     ax_insulin.legend(loc="upper right", fontsize=8, framealpha=0.9, ncol=2)
 
     # --- Active Carbohydrates -------------------------------------------
-    # loop_cob may be entirely empty on non-active-Loop stages -- an all-NaN
-    # series plots as nothing, without error (AC #7).
-    ax_carb.plot(time, data.loop_cob.to_numpy(), color=_PERIWINKLE, linewidth=1.5,
-                 label="Carbs on board")
+    # loop_cob is the LOOP ALGORITHM's own carbs-on-board estimate, so it is
+    # entirely absent on a stage that runs no controller (AC #7). Plotting an
+    # all-NaN line there draws nothing but still legends "Carbs on board", which
+    # reads as "this scenario had no carbs" -- a real misreading in practice, on a
+    # No Loop stage whose meal was plainly driving glucose. The absence is stated
+    # instead. A populated-but-zero series is a different thing (Loop ran and its
+    # COB was genuinely 0), so this keys on notna(), not on the values.
+    has_loop_cob = bool(data.loop_cob.notna().any())
+    if has_loop_cob:
+        ax_carb.plot(time, data.loop_cob.to_numpy(), color=_PERIWINKLE, linewidth=1.5,
+                     label="Carbs on board")
     if data.true_carb.time.size:
         ax_carb.scatter(
             data.true_carb.time, data.true_carb.value, color=_INDIGO, marker="P",
-            s=60, zorder=3, label="Carb entry",
+            s=60, zorder=3, label="Carb entry", clip_on=False,
         )
     if data.reported_carb.time.size:
         ax_carb.scatter(
             data.reported_carb.time, data.reported_carb.value, color=_PERIWINKLE,
-            marker="X", s=50, zorder=3, label="Reported carbs",
+            marker="X", s=50, zorder=3, label="Reported carbs", clip_on=False,
+        )
+    if not has_loop_cob:
+        ax_carb.text(
+            0.5, 0.5, NO_LOOP_COB_NOTE, transform=ax_carb.transAxes,
+            ha="center", va="center", fontsize=9, color=_INDIGO, alpha=0.75,
         )
     _style_section(ax_carb, "Active Carbohydrates", "g", _INDIGO)
     ax_carb.set_ylim(bottom=0)
-    ax_carb.legend(loc="upper right", fontsize=8, framealpha=0.9)
+    # Every series on this axis can legitimately be absent at once, and legending
+    # nothing warns; the note above is what carries the panel in that case.
+    if ax_carb.get_legend_handles_labels()[0]:
+        ax_carb.legend(loc="upper right", fontsize=8, framealpha=0.9)
 
     # Full-width history: pin x-limits to the data span so there is no empty
     # forward gutter (AC #3). Guard against an all-empty/degenerate axis.
