@@ -309,6 +309,23 @@ SUB_MINIMUM_DURATION_CELL = (
 # The metrics AC 11 marks: the two the caveat names, plus the severity they feed.
 INVALIDATED_METRIC_COLUMNS = ("Severity", "LBGI", "DKAI")
 
+# TRSET-30: the same marking in the catastrophic-findings table. A row's
+# updated_severity is either the sim's lbgi_risk_score of 4 verbatim, or a 5
+# escalated from it -- the same LBGI the stage table above already marks, so
+# leaving it bare made the two tables contradict each other.
+INVALIDATED_CATASTROPHIC_COLUMNS = ("updated_severity",)
+
+# ...and why marking that one cell is not the whole story. Rows only reach this
+# table by scoring lbgi_risk_score == 4, so on too short a run the SET of rows is
+# unsound as well: a sim the escalation was never run against cannot appear here.
+# The condition column is exempt -- it reads the BG trace directly (a value <= 0,
+# or a sustained low), which means the same thing at any duration.
+SUB_MINIMUM_DURATION_ROW_SET_CAVEAT = (
+    "Which sims appear here is decided by the same LBGI, so this list may be "
+    "missing sims or holding ones that do not belong. The condition column is read "
+    "from the glucose trace and still applies."
+)
+
 
 def _on_start_day(picked, window_start):
     """Place a picked time of day on the simulation window's start date.
@@ -1018,6 +1035,29 @@ def _render_stage_table(assessment, metrics_valid: bool = True):
     st.dataframe(pd.DataFrame(rows), hide_index=True)
 
 
+def _render_catastrophic_table(findings, metrics_valid: bool = True):
+    """The catastrophic-findings table, marked the same way when the run is too short.
+
+    Presentation only, exactly as _render_stage_table: severity_model's own
+    updated_severity is untouched on the assessment and in the RTF summaries. The
+    rows are kept rather than suppressed because the condition column is the one
+    thing here a short run still establishes -- and a BG trace reaching zero is
+    precisely what such a run is for.
+    """
+    st.markdown("**Catastrophic findings (severity 4→5):**")
+    if not metrics_valid:
+        st.caption(SUB_MINIMUM_DURATION_ROW_SET_CAVEAT)
+    rows = []
+    for finding in findings:
+        row = finding.to_dict()
+        if not metrics_valid:
+            row.update(
+                dict.fromkeys(INVALIDATED_CATASTROPHIC_COLUMNS, SUB_MINIMUM_DURATION_CELL)
+            )
+        rows.append(row)
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+
+
 def _render_risk_dir_result(result):
     with st.expander(result.risk_dir_name, expanded=True):
         if result.assessment is None:
@@ -1037,11 +1077,7 @@ def _render_risk_dir_result(result):
         _render_stage_table(assessment, metrics_valid)
 
         if assessment.catastrophic_findings:
-            st.markdown("**Catastrophic findings (severity 4→5):**")
-            st.dataframe(
-                pd.DataFrame([f.to_dict() for f in assessment.catastrophic_findings]),
-                hide_index=True,
-            )
+            _render_catastrophic_table(assessment.catastrophic_findings, metrics_valid)
 
         if assessment.outlier_status != "ok":
             st.caption(f"Outlier detection: {assessment.outlier_status}")
