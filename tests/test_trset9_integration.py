@@ -274,6 +274,15 @@ def test_the_parser_gives_the_duration_less_meal_its_own_default(on_disk_configs
 # 5: schema conformance (AC 8, first half)
 # ---------------------------------------------------------------------------
 
+def test_every_override_carries_the_default_eight_hour_duration(on_disk_configs):
+    """TRSET-13 made duration explicit; this run leaves the picker on its default,
+    so every override must restate the base config's own 8 hours rather than omit it."""
+    for filename, config in on_disk_configs.items():
+        assert [override["duration_hours"] for override in config["override_config"]] == [
+            meal_config.DURATION_OVERDELIVERY_HOURS
+        ] * 3, filename
+
+
 def test_generated_configs_validate_with_zero_errors(generated):
     config_dir, generated_risk_id, _ = generated
     result = validate_config_dir(config_dir, generated_risk_id)

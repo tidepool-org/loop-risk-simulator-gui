@@ -20,6 +20,13 @@ on the 2_0/swift base configs. Only ``carb_entries`` / ``bolus_entries`` come fr
 user -- glucose history, target range, controller settings and everything reached
 through ``base_config`` are the baseline's.
 
+Simulation length is the user's too (TRSET-13): one ``duration_hours`` chosen for
+the whole configuration and written into every ``override_config`` entry, where it
+replaces the base config's own. ``OverrideItem`` already declares the field and the
+key already exists in base, so ``resolve_override`` applies it with no parser or
+schema change. Window arithmetic here is datetime-aware throughout -- at 23 or 24
+hours a run passes midnight, and a time-of-day end wraps to before its own start.
+
 ``scenario_json_parser_v2.py`` remains the schema authority and is not touched. The
 bounds mirrored in ``_validate_*`` below are the ones
 ``validation.value_validators.ValueValidators`` enforces, checked here so bad input
@@ -65,6 +72,47 @@ BOLUS_UNITS_MAX = 50.0
 # The parser's default absorption duration, applied when an entry omits "duration".
 # Named so the UI can say what omitting it means without repeating the number.
 DEFAULT_CARB_DURATION_MINUTES = 180
+
+# The library's own datetime spelling, mirrored from scenario_json_parser_v2's
+# DATETIME_FORMAT rather than imported: that module is the schema authority and
+# importing it here would drag the whole simulator into a streamlit-free helper.
+LIBRARY_DATETIME_FORMAT = "%m/%d/%Y %H:%M:%S"
+
+# Simulation duration (TRSET-13). One duration applies to the whole configuration --
+# all three stages, all four profiles -- and is written into each override_config
+# entry, where it replaces the base config's own duration_hours. The three presets
+# are the investigative questions the ticket names; short-term exploration takes a
+# free value inside the bounds below.
+#
+# These constants are the single source: streamlit_app builds its picker labels from
+# them, so the app and the generator cannot disagree about what an option means (the
+# same DRY reasoning as scenario_configs_root()).
+DURATION_OVERDELIVERY_HOURS = 8.0
+DURATION_UNDERDELIVERY_HOURS = 23.0
+DURATION_FULL_DAY_HOURS = 24.0
+PRESET_DURATION_HOURS: Tuple[float, ...] = (
+    DURATION_OVERDELIVERY_HOURS,
+    DURATION_UNDERDELIVERY_HOURS,
+    DURATION_FULL_DAY_HOURS,
+)
+
+# Short-term exploration bounds. The maximum stops below the 8-hour preset rather
+# than meeting it, so "short term" always means shorter than the default.
+SHORT_TERM_MIN_HOURS = 2.0
+SHORT_TERM_MAX_HOURS = 7.5
+SHORT_TERM_STEP_HOURS = 0.5
+
+# Below this a run is too short for LBGI and DKAI to mean anything: both are averages
+# over the run, and the severity model reads them as if a full 8 hours produced them.
+METRICS_VALID_MIN_HOURS = 8.0
+
+# Stated verbatim wherever a sub-8-hour duration is offered or its results are shown,
+# so the editor and the results pane cannot word the caveat differently.
+SHORT_DURATION_CAVEAT = (
+    "With a duration of less than 8 hours, LBGI and DKAI results are not valid. "
+    "Use this shorter duration for discovering resulting glucose trace and dosing "
+    "decisions only."
+)
 
 RISK_ID_PREFIX = "TLR-"
 RISK_ID_TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
@@ -116,12 +164,17 @@ STAGES: Tuple[Stage, ...] = (
 class MealEntry:
     """One carb entry: when it starts, how long it absorbs, and its value input.
 
+    ``start_time`` is a full datetime, not a time of day (TRSET-13): at 23 or 24
+    hours the simulation window crosses midnight, so which day an entry falls on is
+    part of when it is. The editor composes start-day datetimes today; adding a day
+    control changes what it composes, not this field.
+
     ``value_input`` means whatever the configuration's mode says it means -- unused
     in standard mode, a multiplier of the profile baseline in multiplier mode, and a
     grams value in custom mode. ``duration_minutes`` of None omits ``duration`` from
     the JSON entirely, so the parser's own 180-minute default applies.
     """
-    start_time: datetime.time
+    start_time: datetime.datetime
     duration_minutes: Optional[int] = None
     value_input: Optional[float] = None
 
@@ -130,13 +183,15 @@ class MealEntry:
 class BolusEntry:
     """One bolus entry: when it is given and how much.
 
+    ``time`` is a full datetime, for the same reason ``MealEntry.start_time`` is.
+
     ``value`` is either a numeric units dose or ``ACCEPT_RECOMMENDATION``.
     ``no_loop_units`` is the numeric dose the No Loop stage uses instead, and is
     required when ``value`` is the sentinel: that stage runs with ``controller: null``,
     so there is no recommendation to accept and the unresolved placeholder would
     silently deliver nothing.
     """
-    time: datetime.time
+    time: datetime.datetime
     value: Union[float, str]
     no_loop_units: Optional[float] = None
 
@@ -154,15 +209,28 @@ class MealConfigSpec:
 
     ``pump`` is the same object as ``patient_model`` when the aligned toggle is on,
     so aligned mode cannot drift; independent mode supplies a second EntrySet.
+
+    ``duration_hours`` is one value for the whole configuration -- every stage and
+    every profile get the identical number. None means the base config's own
+    duration, so the library stays the single source for the default rather than a
+    constant here restating it.
     """
     mode: str
     patient_model: EntrySet
     pump: EntrySet
+    duration_hours: Optional[float] = None
 
     @classmethod
-    def aligned(cls, mode: str, entries: EntrySet) -> "MealConfigSpec":
+    def aligned(
+        cls, mode: str, entries: EntrySet, duration_hours: Optional[float] = None
+    ) -> "MealConfigSpec":
         """Spec whose pump timeline is the same entry set as the patient model's."""
-        return cls(mode=mode, patient_model=entries, pump=entries)
+        return cls(
+            mode=mode,
+            patient_model=entries,
+            pump=entries,
+            duration_hours=duration_hours,
+        )
 
 
 class MealConfigError(ValueError):
@@ -218,20 +286,103 @@ def _base_config_path(profile: Profile) -> str:
     )
 
 
-def simulation_window(profile: Profile = PROFILES[0]) -> Tuple[str, datetime.time, float]:
-    """``(date_token, start_time, duration_hours)`` read from the base config.
+def base_window(profile: Profile = PROFILES[0]) -> Tuple[datetime.datetime, float]:
+    """``(start, duration_hours)`` read from this profile's base config.
 
-    The date token is reproduced verbatim (the library writes "8/15/2019", not a
-    zero-padded form) so generated entries look exactly like hand-written ones. All
-    four T1 base configs share one window; the profile argument exists so that stays
-    checkable rather than assumed.
+    All four T1 base configs share one window; the profile argument exists so that
+    stays checkable rather than assumed.
     """
     path = _base_config_path(profile)
     if not os.path.isfile(path):
         raise MealConfigError(f"Base config for {profile.display} not found: {path}")
     base = _load_json(path)
-    date_token, _, time_token = base["time_to_calculate_at"].partition(" ")
-    return date_token, datetime.datetime.strptime(time_token, "%H:%M:%S").time(), float(base["duration_hours"])
+    start = datetime.datetime.strptime(
+        base["time_to_calculate_at"], LIBRARY_DATETIME_FORMAT
+    )
+    return start, float(base["duration_hours"])
+
+
+def date_token(when: datetime.datetime) -> str:
+    """The library's own date spelling: "8/15/2019", never a zero-padded "08/15/2019".
+
+    Built by hand rather than with strftime, which offers no portable unpadded
+    directive ("%-m" is not available everywhere and "%m" pads).
+    """
+    return f"{when.month}/{when.day}/{when.year}"
+
+
+def entry_token(when: datetime.datetime) -> str:
+    """One timestamp as the library writes them: ``M/D/YYYY HH:MM:SS``."""
+    return f"{date_token(when)} {when.strftime('%H:%M:%S')}"
+
+
+def validate_duration_hours(duration_hours: Optional[float]) -> float:
+    """The duration a run may use, or MealConfigError naming the bound it broke."""
+    if duration_hours is None:
+        raise MealConfigError("A simulation duration is required.")
+    hours = float(duration_hours)
+    if hours in PRESET_DURATION_HOURS:
+        return hours
+    if not SHORT_TERM_MIN_HOURS <= hours <= SHORT_TERM_MAX_HOURS:
+        raise MealConfigError(
+            f"A short-term duration must be between {SHORT_TERM_MIN_HOURS:g} and "
+            f"{SHORT_TERM_MAX_HOURS:g} hours, got {hours:g}."
+        )
+    if abs(hours / SHORT_TERM_STEP_HOURS - round(hours / SHORT_TERM_STEP_HOURS)) > 1e-9:
+        raise MealConfigError(
+            f"A short-term duration must be a multiple of {SHORT_TERM_STEP_HOURS:g} "
+            f"hours, got {hours:g}."
+        )
+    return hours
+
+
+def simulation_window(
+    duration_hours: Optional[float] = None,
+    profile: Profile = PROFILES[0],
+) -> Tuple[datetime.datetime, datetime.datetime, float]:
+    """``(start, end, duration_hours)`` for a run of this length on this profile.
+
+    Datetimes throughout, and ``end`` is ``start + duration``. A ``datetime.time``
+    end wraps once the run passes midnight -- 12:00 + 23h reads back as 11:00, and
+    every ``start <= when <= end`` check silently becomes false. That was latent
+    while 8 hours was the only duration; a selectable one triggers it.
+
+    ``duration_hours`` of None means the base config's own, so the library stays the
+    single source for the default rather than a constant here restating it.
+    """
+    start, base_duration = base_window(profile)
+    hours = (
+        base_duration if duration_hours is None else validate_duration_hours(duration_hours)
+    )
+    return start, start + datetime.timedelta(hours=hours), hours
+
+
+def authoring_window(
+    duration_hours: Optional[float] = None,
+    profile: Profile = PROFILES[0],
+) -> Tuple[datetime.datetime, datetime.datetime]:
+    """``(earliest, latest)`` an entry can be AUTHORED at -- a view bound, not a rule.
+
+    The editor has no day control yet, so it can only place entries on the start
+    calendar day. Where the window crosses midnight the simulation still runs past
+    this bound; there is simply nothing authorable out there.
+
+    Validation deliberately does not use this: entries are checked against the real
+    simulation window, so adding a day control widens what the view offers without
+    touching what ``generate_config`` will accept.
+    """
+    start, end, _ = simulation_window(duration_hours, profile)
+    end_of_start_day = datetime.datetime.combine(start.date(), datetime.time.max)
+    return start, min(end, end_of_start_day)
+
+
+def metrics_are_valid(duration_hours: float) -> bool:
+    """Whether LBGI and DKAI mean anything for a run of this length.
+
+    The one gate behind every "not valid" marking, so the editor's caveat and the
+    results pane's cannot disagree about which runs it applies to.
+    """
+    return float(duration_hours) >= METRICS_VALID_MIN_HOURS
 
 
 # ---------------------------------------------------------------------------
@@ -239,18 +390,31 @@ def simulation_window(profile: Profile = PROFILES[0]) -> Tuple[str, datetime.tim
 # ---------------------------------------------------------------------------
 
 
-def _window_bounds() -> Tuple[datetime.time, datetime.time]:
-    _, start, duration_hours = simulation_window()
-    start_dt = datetime.datetime.combine(datetime.date.today(), start)
-    return start, (start_dt + datetime.timedelta(hours=duration_hours)).time()
+def _format_window(start: datetime.datetime, end: datetime.datetime) -> str:
+    """The window as message text, dated on both ends only when it spans two days."""
+    if start.date() == end.date():
+        return (
+            f"{date_token(start)} {start.strftime('%H:%M:%S')}-{end.strftime('%H:%M:%S')}"
+        )
+    return f"{entry_token(start)}-{entry_token(end)}"
 
 
-def _validate_within_window(when: datetime.time, label: str) -> None:
-    start, end = _window_bounds()
+def _validate_within_window(
+    when: datetime.datetime,
+    label: str,
+    start: datetime.datetime,
+    end: datetime.datetime,
+) -> None:
+    """Reject an entry outside the run, naming the entry and the window it missed.
+
+    The bounds are passed in rather than recomputed so one duration is read once per
+    generated config, and an entry is never checked against a different window than
+    the one being written.
+    """
     if not start <= when <= end:
         raise MealConfigError(
-            f"{label} {when.strftime('%H:%M:%S')} is outside the simulation window "
-            f"{start.strftime('%H:%M:%S')}-{end.strftime('%H:%M:%S')}."
+            f"{label} {entry_token(when)} is outside the simulation window "
+            f"{_format_window(start, end)}."
         )
 
 
@@ -327,11 +491,16 @@ def resolve_carb_grams(mode: str, profile: Profile, value_input: Optional[float]
     return _validate_grams(round(grams, 4), f"Meal for {profile.display}")
 
 
-def _carb_entry_json(entry: MealEntry, profile: Profile, mode: str, date_token: str) -> dict:
-    _validate_within_window(entry.start_time, "Meal start time")
+def _carb_entry_json(
+    entry: MealEntry,
+    profile: Profile,
+    mode: str,
+    window: Tuple[datetime.datetime, datetime.datetime],
+) -> dict:
+    _validate_within_window(entry.start_time, "Meal start time", *window)
     carb_entry = {
         "type": "carb",
-        "start_time": f"{date_token} {entry.start_time.strftime('%H:%M:%S')}",
+        "start_time": entry_token(entry.start_time),
         "value": resolve_carb_grams(mode, profile, entry.value_input),
     }
     duration = _validate_duration(entry.duration_minutes)
@@ -340,15 +509,19 @@ def _carb_entry_json(entry: MealEntry, profile: Profile, mode: str, date_token: 
     return carb_entry
 
 
-def _bolus_entry_json(entry: BolusEntry, date_token: str, loop_enabled: bool) -> dict:
+def _bolus_entry_json(
+    entry: BolusEntry,
+    window: Tuple[datetime.datetime, datetime.datetime],
+    loop_enabled: bool,
+) -> dict:
     """One bolus entry as JSON, resolved for whether Loop is running in this stage.
 
     In the No Loop stage the ``accept_recommendation`` sentinel is replaced by the
     entry's ``no_loop_units``: with ``controller: null`` nothing ever resolves the
     placeholder, so leaving it in place would run that stage with no insulin at all.
     """
-    _validate_within_window(entry.time, "Bolus time")
-    time_token = f"{date_token} {entry.time.strftime('%H:%M:%S')}"
+    _validate_within_window(entry.time, "Bolus time", *window)
+    time_token = entry_token(entry.time)
     if entry.value == ACCEPT_RECOMMENDATION:
         if loop_enabled:
             return {"time": time_token, "value": ACCEPT_RECOMMENDATION}
@@ -403,20 +576,21 @@ def _stage_override(
     stage: Stage,
     profile: Profile,
     spec: MealConfigSpec,
-    date_token: str,
+    window: Tuple[datetime.datetime, datetime.datetime],
+    duration_hours: float,
 ) -> dict:
     patient_carbs = [
-        _carb_entry_json(meal, profile, spec.mode, date_token) for meal in spec.patient_model.meals
+        _carb_entry_json(meal, profile, spec.mode, window) for meal in spec.patient_model.meals
     ]
     pump_carbs = [
-        _carb_entry_json(meal, profile, spec.mode, date_token) for meal in spec.pump.meals
+        _carb_entry_json(meal, profile, spec.mode, window) for meal in spec.pump.meals
     ]
     patient_boluses = [
-        _bolus_entry_json(bolus, date_token, stage.loop_enabled)
+        _bolus_entry_json(bolus, window, stage.loop_enabled)
         for bolus in spec.patient_model.boluses
     ]
     pump_boluses = _pump_bolus_entries([
-        _bolus_entry_json(bolus, date_token, stage.loop_enabled) for bolus in spec.pump.boluses
+        _bolus_entry_json(bolus, window, stage.loop_enabled) for bolus in spec.pump.boluses
     ])
 
     pump = {"carb_entries": pump_carbs, "bolus_entries": pump_boluses}
@@ -427,6 +601,10 @@ def _stage_override(
 
     override = {
         "sim_id": stage.sim_id_prefix + profile.token,
+        # Written into EVERY override entry, not once at the top: the parser reads
+        # duration_hours off the merged per-sim config, and the key already exists in
+        # base, so resolve_override replaces it with no schema or parser change.
+        "duration_hours": duration_hours,
         "patient": {
             "patient_model": {
                 "glucose_history": GLUCOSE_HISTORY_POINTER,
@@ -453,7 +631,7 @@ def generate_config(spec: MealConfigSpec, generated_risk_id: str, profile: Profi
     _validate_mode(spec.mode)
     if not spec.patient_model.meals and not spec.patient_model.boluses:
         raise MealConfigError("Add at least one meal or bolus entry before generating configs.")
-    date_token, _, _ = simulation_window(profile)
+    start, end, duration_hours = simulation_window(spec.duration_hours, profile)
     return {
         "metadata": {
             "risk_id": generated_risk_id,
@@ -463,7 +641,8 @@ def generate_config(spec: MealConfigSpec, generated_risk_id: str, profile: Profi
         },
         "base_config": base_config_pointer(profile),
         "override_config": [
-            _stage_override(stage, profile, spec, date_token) for stage in STAGES
+            _stage_override(stage, profile, spec, (start, end), duration_hours)
+            for stage in STAGES
         ],
     }
 

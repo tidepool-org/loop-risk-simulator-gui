@@ -21,22 +21,32 @@ import pytest
 import meal_config
 
 
-NOON = datetime.time(12, 0, 0)
-AFTERNOON = datetime.time(15, 30, 0)
-# The base configs run 8/15/2019 12:00 for 8 hours, so this is outside the window.
-BEFORE_WINDOW = datetime.time(11, 59, 0)
-AFTER_WINDOW = datetime.time(20, 1, 0)
+# The base configs run 8/15/2019 12:00 for 8 hours. Entries are datetimes, not
+# times of day (TRSET-13): once a run passes midnight, which day an entry falls on
+# is part of when it is.
+START_DAY = datetime.date(2019, 8, 15)
+
+
+def _at(hour, minute=0, day=START_DAY):
+    return datetime.datetime.combine(day, datetime.time(hour, minute, 0))
+
+
+NOON = _at(12)
+AFTERNOON = _at(15, 30)
+BEFORE_WINDOW = _at(11, 59)
+AFTER_WINDOW = _at(20, 1)
 
 RISK_ID = "TLR-20260806-143000"
 
 
-def _spec(mode=meal_config.MODE_STANDARD, meals=None, boluses=None):
+def _spec(mode=meal_config.MODE_STANDARD, meals=None, boluses=None, duration_hours=None):
     return meal_config.MealConfigSpec.aligned(
         mode,
         meal_config.EntrySet(
             meals=meals if meals is not None else [meal_config.MealEntry(NOON)],
             boluses=boluses if boluses is not None else [],
         ),
+        duration_hours=duration_hours,
     )
 
 
@@ -187,6 +197,146 @@ def test_entry_times_outside_the_simulation_window_are_rejected(when):
 def test_a_spec_with_no_entries_at_all_is_rejected():
     with pytest.raises(meal_config.MealConfigError, match="at least one meal or bolus"):
         _median_config(_spec(meals=[], boluses=[]))
+
+
+# ---------------------------------------------------------------------------
+# Simulation duration and the window it sets (TRSET-13)
+# ---------------------------------------------------------------------------
+
+
+def test_the_default_duration_is_the_base_configs_own_not_a_constant_restating_it():
+    """None means "whatever the library says", so there is one source for it."""
+    base_start, base_hours = meal_config.base_window()
+    start, end, hours = meal_config.simulation_window(None)
+    assert (start, hours) == (base_start, base_hours)
+    assert end == base_start + datetime.timedelta(hours=base_hours)
+
+
+@pytest.mark.parametrize(
+    "duration_hours, expected_end",
+    [
+        (meal_config.DURATION_OVERDELIVERY_HOURS, _at(20)),
+        (meal_config.DURATION_UNDERDELIVERY_HOURS, _at(11, day=datetime.date(2019, 8, 16))),
+        (meal_config.DURATION_FULL_DAY_HOURS, _at(12, day=datetime.date(2019, 8, 16))),
+        (2.0, _at(14)),
+        (7.5, _at(19, 30)),
+    ],
+)
+def test_the_window_end_is_start_plus_duration_and_never_wraps(duration_hours, expected_end):
+    """The defect this fixes: (12:00 + 23h).time() reads back as 11:00, so every
+    ``start <= when <= end`` check silently became false."""
+    start, end, hours = meal_config.simulation_window(duration_hours)
+    assert (start, end, hours) == (NOON, expected_end, duration_hours)
+    assert end > start, "the window must never wrap"
+
+
+def test_an_entry_late_in_a_midnight_crossing_window_is_accepted():
+    """At 8 hours this same entry is out of the window -- at 24 it is not."""
+    spec = _spec(
+        meals=[meal_config.MealEntry(_at(23, 30))],
+        duration_hours=meal_config.DURATION_FULL_DAY_HOURS,
+    )
+    entry = _pm(_stage(_median_config(spec), 0))["carb_entries"][0]
+    assert entry["start_time"] == "8/15/2019 23:30:00"
+
+
+def test_an_entry_beyond_a_shortened_window_is_rejected_never_moved():
+    spec = _spec(meals=[meal_config.MealEntry(AFTERNOON)], duration_hours=2.0)
+    with pytest.raises(meal_config.MealConfigError) as excinfo:
+        _median_config(spec)
+    message = str(excinfo.value)
+    assert "8/15/2019 15:30:00" in message, message      # names the entry
+    assert "12:00:00-14:00:00" in message, message       # names the window
+
+
+def test_an_entry_on_a_later_day_takes_its_own_date_token():
+    """The token comes from the entry's own datetime, not one module-level token --
+    so widening the authoring bound to a second day needs no change here."""
+    spec = _spec(
+        meals=[meal_config.MealEntry(_at(3, 15, day=datetime.date(2019, 8, 16)))],
+        duration_hours=meal_config.DURATION_FULL_DAY_HOURS,
+    )
+    entry = _pm(_stage(_median_config(spec), 0))["carb_entries"][0]
+    assert entry["start_time"] == "8/16/2019 03:15:00"
+
+
+def test_the_date_token_keeps_the_librarys_unpadded_spelling():
+    assert meal_config.date_token(_at(12)) == "8/15/2019"
+    assert meal_config.entry_token(_at(9, 5)) == "8/15/2019 09:05:00"
+
+
+@pytest.mark.parametrize("duration_hours", meal_config.PRESET_DURATION_HOURS)
+def test_every_preset_duration_is_accepted(duration_hours):
+    assert meal_config.validate_duration_hours(duration_hours) == duration_hours
+
+
+@pytest.mark.parametrize("duration_hours", [2.0, 2.5, 5.0, 7.5])
+def test_short_term_durations_on_the_half_hour_are_accepted(duration_hours):
+    assert meal_config.validate_duration_hours(duration_hours) == duration_hours
+
+
+@pytest.mark.parametrize("duration_hours", [1.5, 0.0, 7.75, 9.0, 25.0])
+def test_short_term_durations_outside_the_bounds_are_rejected_naming_the_bound(
+    duration_hours
+):
+    with pytest.raises(meal_config.MealConfigError, match="between 2 and 7.5 hours"):
+        meal_config.validate_duration_hours(duration_hours)
+
+
+@pytest.mark.parametrize("duration_hours", [2.25, 3.1, 6.75])
+def test_short_term_durations_off_the_half_hour_step_are_rejected(duration_hours):
+    with pytest.raises(meal_config.MealConfigError, match="multiple of 0.5 hours"):
+        meal_config.validate_duration_hours(duration_hours)
+
+
+def test_a_missing_duration_is_rejected_rather_than_guessed():
+    with pytest.raises(meal_config.MealConfigError, match="duration is required"):
+        meal_config.validate_duration_hours(None)
+
+
+def test_an_invalid_duration_is_rejected_before_any_config_is_generated():
+    spec = _spec(duration_hours=3.1)
+    with pytest.raises(meal_config.MealConfigError, match="multiple of 0.5 hours"):
+        _median_config(spec)
+
+
+@pytest.mark.parametrize(
+    "duration_hours",
+    [None, 2.0, meal_config.DURATION_UNDERDELIVERY_HOURS, meal_config.DURATION_FULL_DAY_HOURS],
+)
+def test_every_override_entry_of_every_profile_carries_the_duration(duration_hours):
+    """One duration for the whole configuration: three stages x four profiles."""
+    expected = meal_config.simulation_window(duration_hours)[2]
+    configs = meal_config.generate_configs(_spec(duration_hours=duration_hours), RISK_ID)
+
+    assert len(configs) == len(meal_config.PROFILES)
+    for filename, config in configs.items():
+        durations = [override["duration_hours"] for override in config["override_config"]]
+        assert durations == [expected] * len(meal_config.STAGES), filename
+
+
+def test_the_authoring_window_stops_at_the_end_of_the_start_day_but_the_run_does_not():
+    """The clamp is a bound on what the editor can offer, not a rule about the run."""
+    _, sim_end, _ = meal_config.simulation_window(meal_config.DURATION_FULL_DAY_HOURS)
+    start, latest = meal_config.authoring_window(meal_config.DURATION_FULL_DAY_HOURS)
+
+    assert start == NOON
+    assert latest.date() == START_DAY
+    assert latest < sim_end, "the simulated tail must extend past the authoring bound"
+
+
+@pytest.mark.parametrize("duration_hours", [2.0, 7.5, meal_config.DURATION_OVERDELIVERY_HOURS])
+def test_a_window_inside_one_day_is_not_clamped_at_all(duration_hours):
+    _, sim_end, _ = meal_config.simulation_window(duration_hours)
+    assert meal_config.authoring_window(duration_hours)[1] == sim_end
+
+
+@pytest.mark.parametrize(
+    "duration_hours, valid",
+    [(2.0, False), (7.5, False), (8.0, True), (23.0, True), (24.0, True)],
+)
+def test_metrics_are_valid_only_from_eight_hours_up(duration_hours, valid):
+    assert meal_config.metrics_are_valid(duration_hours) is valid
 
 
 # ---------------------------------------------------------------------------

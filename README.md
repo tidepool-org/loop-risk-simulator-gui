@@ -365,6 +365,60 @@ selection changing rather than on any rerun happening: the rerun that follows a 
 completing must not wipe the run that just finished. Skipped while a run is in flight,
 since that run owns the state and has nothing displayed yet.
 
+## Selectable simulation duration (TRSET-13)
+
+**What changed (≤100 words):** The meal/bolus editor gained a duration picker, framed
+by the investigative question rather than an hour count: overdelivery (8 h),
+underdelivery (23 h), a full day (24 h), or a free 2.0–7.5 h short-term value in
+0.5-h steps. One duration applies to the whole configuration and is written into
+**every** `override_config` entry, where it replaces the base config's own. Window
+arithmetic in `meal_config.py` is now datetime-aware, fixing a latent wrap that made
+every entry check false past midnight. `OverrideItem` already declares
+`duration_hours`; no parser, schema, `gui_runner` or `severity_model` change.
+
+Example:
+
+```bash
+streamlit run streamlit_app.py     # Configure meals & boluses -> Simulation duration -> Generate configs -> Run Tool
+```
+
+```python
+import meal_config
+
+start, end, hours = meal_config.simulation_window(24.0)     # datetimes; never wraps
+earliest, latest = meal_config.authoring_window(24.0)       # view bound: ends 23:59:59 on the start day
+spec = meal_config.MealConfigSpec.aligned(mode, entries, duration_hours=24.0)
+```
+
+**Validation (≤100 words):** Two real runs, no mocks
+(`tests/test_trset13_integration.py`). A 2-hour run proves picker → `duration_hours`
+in all twelve overrides → `ConfigValidator` → the merged config the run resolved →
+a trace that stops at 14:00 rather than 20:00, and the results pane marking LBGI,
+DKAI and Severity as not valid. A `-m slow` 24-hour run proves the midnight-crossing
+path: a 23:30 entry kept where it was authored, and a trace reaching 8/16. The 8- and
+23-hour presets are asserted at the config boundary. The slow run takes 4m25s
+against roughly a minute for the 8-hour default. Full GUI suite: 292 passed,
+7 skipped, 1 deselected (`-m slow`: 1 passed).
+
+**Cautions / limitations:** Under 8 hours, LBGI and DKAI are **not valid** — the app
+says so in the editor and marks the cells in the results, but the RTF summaries and
+the export zip carry the raw values unmarked (deliberately out of scope; raise
+separately before treating an exported short run as a record). Entries can only be
+authored on the start calendar day, so a 23/24-hour run has no entries after
+midnight; the run itself continues past it. Carb absorption still defaults to 180
+minutes, so a sub-3-hour run truncates it. The duration applies to the
+*Configure meals & boluses* path only — library configs keep their own
+`duration_hours`, and `gui_runner.run_risk_assessment`'s signature is unchanged. A
+23/24-hour run takes roughly three times as long as the 8-hour default.
+
+Internal shape changes (this repo only, no external consumers): `MealEntry.start_time`
+and `BolusEntry.time` are `datetime.datetime` rather than `datetime.time`;
+`simulation_window()` returns `(start, end, duration_hours)` as datetimes and takes an
+optional duration; `_window_bounds()` is replaced by `authoring_window()`. The
+start-day clamp lives in the view (`streamlit_app._on_start_day`), never inside
+`meal_config` — adding multi-day authoring is a day control plus a widened bound, not
+a rewrite.
+
 ## Empty carb panel on a No Loop stage (TRSET-9 follow-up, renderer)
 
 **What changed (≤100 words):** Two fixes in `loop_home_renderer.py`. (1) `loop_cob`

@@ -12,6 +12,7 @@ temp directory with no changes required there.
 import base64
 import datetime
 import io
+import json
 import os
 import tempfile
 import threading
@@ -271,9 +272,125 @@ PUMP_SENTINEL_NOTE = (
 
 MAX_ENTRIES = 10
 
+# Simulation duration (TRSET-13). Labelled by the investigative question being
+# asked, not by a raw hour count -- the hours are a consequence of the question, so
+# they are appended rather than leading. The values come from meal_config, so the
+# picker and the generator cannot disagree about what an option means.
+SHORT_TERM_DURATION_LABEL = "I'm interested in what happens in the short term"
+
+DURATION_LABELS = {
+    f"I expect this situation will result in overdelivery "
+    f"({meal_config.DURATION_OVERDELIVERY_HOURS:g} hours)":
+        meal_config.DURATION_OVERDELIVERY_HOURS,
+    f"I expect this situation will result in underdelivery "
+    f"({meal_config.DURATION_UNDERDELIVERY_HOURS:g} hours)":
+        meal_config.DURATION_UNDERDELIVERY_HOURS,
+    f"I'm interested in what happens over the course of a full day "
+    f"({meal_config.DURATION_FULL_DAY_HOURS:g} hours)":
+        meal_config.DURATION_FULL_DAY_HOURS,
+    # The one option with no fixed value: it reveals the free-entry input below.
+    SHORT_TERM_DURATION_LABEL: None,
+}
+
+# Said next to the picker rather than after the wait, so it informs the choice.
+LONG_RUN_COST_NOTE = (
+    f"A {meal_config.DURATION_UNDERDELIVERY_HOURS:g}- or "
+    f"{meal_config.DURATION_FULL_DAY_HOURS:g}-hour run takes roughly three times as "
+    f"long as the {meal_config.DURATION_OVERDELIVERY_HOURS:g}-hour default."
+)
+
+# What a metric cell says for a run too short to have produced a meaningful one.
+# Text, not a color or a blank -- a blank reads as "no data", which is a different
+# and wrong claim (the value exists; it just does not mean anything).
+SUB_MINIMUM_DURATION_CELL = (
+    f"not valid (<{meal_config.METRICS_VALID_MIN_HOURS:g} h run)"
+)
+
+# The metrics AC 11 marks: the two the caveat names, plus the severity they feed.
+INVALIDATED_METRIC_COLUMNS = ("Severity", "LBGI", "DKAI")
+
+
+def _on_start_day(picked, window_start):
+    """Place a picked time of day on the simulation window's start date.
+
+    The editor's start-day clamp, and the only place it lives: entries are datetimes
+    (TRSET-13), and with no day control every one of them belongs to the calendar day
+    the run starts on. Where the window crosses midnight the run continues past this
+    bound with nothing authorable out there. A day control replaces this call --
+    meal_config validates against the real window and never assumes a single day.
+    """
+    return datetime.datetime.combine(window_start.date(), picked)
+
+
+def _render_duration_control():
+    """The duration picker. Returns the selected hours, or None if it is unusable.
+
+    One duration applies to the whole configuration -- all three stages and all four
+    profiles get the identical value -- so this is asked once, above the entries
+    whose window it sets.
+    """
+    label = st.radio(
+        "Simulation duration",
+        options=list(DURATION_LABELS),
+        key="sim_duration_choice",
+    )
+    st.caption(LONG_RUN_COST_NOTE)
+
+    hours = DURATION_LABELS[label]
+    if hours is not None:
+        return hours
+
+    hours = st.number_input(
+        "Short-term simulation duration (hours)",
+        min_value=meal_config.SHORT_TERM_MIN_HOURS,
+        max_value=meal_config.SHORT_TERM_MAX_HOURS,
+        value=meal_config.SHORT_TERM_MIN_HOURS,
+        step=meal_config.SHORT_TERM_STEP_HOURS,
+        key="sim_duration_hours",
+    )
+    st.caption(meal_config.SHORT_DURATION_CAVEAT)
+    try:
+        # min/max bound the widget, but a typed value need not land on the step --
+        # rejected here, naming the bound, rather than silently rounded.
+        return meal_config.validate_duration_hours(hours)
+    except meal_config.MealConfigError as exc:
+        st.error(str(exc))
+        return None
+
+
+def _window_caption(duration_hours) -> str:
+    """What the entry window is, and what the run actually covers, for this duration.
+
+    They differ once the run crosses midnight: the run keeps going, the editor stops
+    at the end of the start day. Saying so beats an entry field that silently will
+    not accept the time a user wants.
+    """
+    start, end, hours = meal_config.simulation_window(duration_hours)
+    _, latest = meal_config.authoring_window(duration_hours)
+    trailer = (
+        f"Leaving absorption blank uses the simulator's "
+        f"{meal_config.DEFAULT_CARB_DURATION_MINUTES}-minute default."
+    )
+    if latest == end:
+        return (
+            f"Entries must fall within the simulation window "
+            f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')} ({hours:g} hours). "
+            + trailer
+        )
+    return (
+        f"The simulation runs {hours:g} hours, from {start.strftime('%H:%M')} on "
+        f"{meal_config.date_token(start)} to {end.strftime('%H:%M')} on "
+        f"{meal_config.date_token(end)}. Entries must fall between "
+        f"{start.strftime('%H:%M')} and {latest.strftime('%H:%M')} on the start day; "
+        f"the run continues past midnight with no entries after it. " + trailer
+    )
+
 
 def _meal_entry_rows(key_prefix: str, mode: str, count: int, window_start) -> list:
     """Render `count` meal rows and return them as MealEntry objects.
+
+    ``window_start`` is the simulation window's start datetime; the rows collect a
+    time of day and `_on_start_day` puts it on that date.
 
     Every widget carries a full label (WCAG 1.3/2.1, guarded by the TRSET-4 tests),
     so the row index is part of the label rather than only a column header. Leaving
@@ -286,7 +403,7 @@ def _meal_entry_rows(key_prefix: str, mode: str, count: int, window_start) -> li
         with time_column:
             start_time = st.time_input(
                 f"Meal {index + 1} start time",
-                value=window_start,
+                value=window_start.time(),
                 step=datetime.timedelta(minutes=5),
                 key=f"{key_prefix}_meal_time_{index}",
             )
@@ -321,7 +438,11 @@ def _meal_entry_rows(key_prefix: str, mode: str, count: int, window_start) -> li
             else:
                 value_input = None
                 st.caption(f"Meal {index + 1}: per-profile standard")
-        entries.append(meal_config.MealEntry(start_time, duration, value_input))
+        entries.append(
+            meal_config.MealEntry(
+                _on_start_day(start_time, window_start), duration, value_input
+            )
+        )
     return entries
 
 
@@ -338,7 +459,7 @@ def _bolus_entry_rows(key_prefix: str, count: int, window_start, allow_sentinel:
         with time_column:
             bolus_time = st.time_input(
                 f"Bolus {index + 1} time",
-                value=window_start,
+                value=window_start.time(),
                 step=datetime.timedelta(minutes=5),
                 key=f"{key_prefix}_bolus_time_{index}",
             )
@@ -366,14 +487,15 @@ def _bolus_entry_rows(key_prefix: str, count: int, window_start, allow_sentinel:
                 placeholder="units",
                 key=f"{key_prefix}_bolus_units_{index}",
             )
+        when = _on_start_day(bolus_time, window_start)
         if kind == BOLUS_ACCEPT_CHOICE:
             entries.append(
                 meal_config.BolusEntry(
-                    bolus_time, meal_config.ACCEPT_RECOMMENDATION, no_loop_units=units
+                    when, meal_config.ACCEPT_RECOMMENDATION, no_loop_units=units
                 )
             )
         else:
-            entries.append(meal_config.BolusEntry(bolus_time, units))
+            entries.append(meal_config.BolusEntry(when, units))
     return entries
 
 
@@ -406,6 +528,7 @@ def _reset_generated_state() -> None:
     st.session_state.generated_config_dir = None
     st.session_state.generated_risk_id = None
     st.session_state.generated_configs = None
+    st.session_state.generated_duration_hours = None
     st.session_state.generated_error = None
 
 
@@ -452,6 +575,17 @@ def _sync_selection(selection: tuple) -> None:
         _reset_run_state()
 
 
+def _configs_duration_hours(configs: dict) -> float:
+    """The duration a generated config set was built with, read back from its JSON.
+
+    Read from the configs rather than from the picker so that what is reported, and
+    what a duration change is compared against, are both what was actually generated.
+    All four files and all three stages carry the same value by construction.
+    """
+    first = next(iter(sorted(configs)))
+    return float(configs[first]["override_config"][0]["duration_hours"])
+
+
 def _generated_temp_dir() -> str:
     """Session-scoped temp root the generated config library is written under.
 
@@ -478,6 +612,7 @@ def _generate_configs(spec) -> None:
         st.session_state.generated_config_dir = config_dir
         st.session_state.generated_risk_id = generated_risk_id
         st.session_state.generated_configs = configs
+        st.session_state.generated_duration_hours = _configs_duration_hours(configs)
         st.session_state.generated_error = None
         # No reset here: the new risk id changes the selection, and _sync_selection
         # clears the previous run for every way the selection can change.
@@ -502,6 +637,11 @@ def _render_generated_summary() -> None:
     configs = st.session_state.generated_configs
     generated_risk_id = st.session_state.generated_risk_id
     st.success(f"Generated {len(configs)} config file(s) with risk id `{generated_risk_id}`.")
+
+    duration_hours = _configs_duration_hours(configs)
+    st.caption(f"Simulation duration: {duration_hours:g} hours per stage.")
+    if not meal_config.metrics_are_valid(duration_hours):
+        st.caption(meal_config.SHORT_DURATION_CAVEAT)
 
     rows = []
     for filename, config in sorted(configs.items()):
@@ -532,17 +672,21 @@ def _render_meal_config_editor():
     run before that.
     """
     st.markdown("### Meal and bolus configuration")
-    _, window_start, window_hours = meal_config.simulation_window()
-    window_end = (
-        datetime.datetime.combine(datetime.date.today(), window_start)
-        + datetime.timedelta(hours=window_hours)
-    ).time()
-    st.caption(
-        f"Entries must fall within the simulation window "
-        f"{window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} "
-        f"({window_hours:g} hours). Leaving absorption blank uses the simulator's "
-        f"{meal_config.DEFAULT_CARB_DURATION_MINUTES}-minute default."
-    )
+
+    duration_hours = _render_duration_control()
+    if duration_hours is None:
+        st.info("Choose a usable simulation duration to configure entries.")
+        return None, None
+
+    # A config set generated against a duration the picker no longer shows must not
+    # survive to be run or downloaded (AC 9): its entry window, and every stage's
+    # duration_hours, belong to a question that is no longer being asked. Dropping it
+    # also changes the selection, so _sync_selection clears any run behind it.
+    if st.session_state.generated_duration_hours not in (None, duration_hours):
+        _reset_generated_state()
+
+    window_start, _ = meal_config.authoring_window(duration_hours)
+    st.caption(_window_caption(duration_hours))
 
     mode_label = st.radio(
         "Meal value", options=list(MODE_LABELS), horizontal=True, key="meal_mode"
@@ -575,12 +719,16 @@ def _render_meal_config_editor():
         "pm", "Patient model", mode, window_start, allow_sentinel=True
     )
     if aligned:
-        spec = meal_config.MealConfigSpec.aligned(mode, patient_entries)
+        spec = meal_config.MealConfigSpec.aligned(
+            mode, patient_entries, duration_hours=duration_hours
+        )
     else:
         pump_entries = _entry_set_editor(
             "pump", "Pump", mode, window_start, allow_sentinel=False
         )
-        spec = meal_config.MealConfigSpec(mode, patient_entries, pump_entries)
+        spec = meal_config.MealConfigSpec(
+            mode, patient_entries, pump_entries, duration_hours=duration_hours
+        )
 
     if st.button("Generate configs"):
         _generate_configs(spec)
@@ -765,6 +913,9 @@ def _init_session_state():
         "generated_config_dir": None,
         "generated_risk_id": None,
         "generated_configs": None,
+        # The duration the current set was generated with (TRSET-13), so changing
+        # the picker can invalidate a set built for a different question.
+        "generated_duration_hours": None,
         "generated_error": None,
         # The selection the page last rendered for, so a change can be detected and
         # the previous selection's results cleared. _UNSET (not a real selection) so
@@ -823,13 +974,34 @@ def _start_run(config_dir, target_risk_dir):
     thread.start()
 
 
-def _render_stage_table(assessment):
+def _run_duration_hours():
+    """The duration the CURRENT run's configs carried, or None for a library run.
+
+    Read from the run_generated_configs snapshot taken at run start, so the marking
+    below describes the run on screen rather than whatever the editor now shows. A
+    library run has no snapshot: its duration is whatever its own configs say, which
+    this feature does not set and does not claim to know.
+    """
+    snapshot = st.session_state.run_generated_configs
+    if not snapshot:
+        return None
+    _, payload = snapshot[0]
+    return _configs_duration_hours({"": json.loads(payload.decode("utf-8"))})
+
+
+def _render_stage_table(assessment, metrics_valid: bool = True):
+    """The per-stage metrics table, with the invalid ones marked when too short.
+
+    Presentation only (AC 11): the values are still whatever severity_model computed
+    and the RTF summaries still carry them. What changes here is the claim the table
+    makes about them.
+    """
     rows = []
     for stage in STAGE_ORDER:
         stage_result = assessment.stages.get(stage)
         if stage_result is None:
             continue
-        rows.append({
+        row = {
             "Stage": STAGE_DISPLAY[stage],
             "Harm type": stage_result.harm_type,
             "Severity": stage_result.severity,
@@ -839,7 +1011,10 @@ def _render_stage_table(assessment):
             "DKAI": stage_result.dka_index_value_avg,
             "TAR %": stage_result.tar,
             "N sims": stage_result.n_sims,
-        })
+        }
+        if not metrics_valid:
+            row.update(dict.fromkeys(INVALIDATED_METRIC_COLUMNS, SUB_MINIMUM_DURATION_CELL))
+        rows.append(row)
     st.dataframe(pd.DataFrame(rows), hide_index=True)
 
 
@@ -854,7 +1029,12 @@ def _render_risk_dir_result(result):
 
         assessment = result.assessment
         st.caption(f"{assessment.profile_count} profile(s) · timestamp {assessment.timestamp}")
-        _render_stage_table(assessment)
+
+        duration_hours = _run_duration_hours()
+        metrics_valid = duration_hours is None or meal_config.metrics_are_valid(duration_hours)
+        if not metrics_valid:
+            st.caption(meal_config.SHORT_DURATION_CAVEAT)
+        _render_stage_table(assessment, metrics_valid)
 
         if assessment.catastrophic_findings:
             st.markdown("**Catastrophic findings (severity 4→5):**")
