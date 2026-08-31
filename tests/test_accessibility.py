@@ -318,6 +318,25 @@ def test_severity_information_is_conveyed_as_text_not_color_alone():
     assert stage_df["Severity"].iloc[0] == "3", "severity must render as a text value, not a color swatch"
 
 
+def test_the_duration_pickers_widgets_carry_accessible_labels():
+    # TRSET-13: the duration radio, and the short-term input it reveals, are the two
+    # widgets the feature adds. The generic gate above renders only the default
+    # (library) source, so neither is reachable there -- this drives the editor to
+    # the state where both exist and re-runs the same label assertion over it.
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.run()
+    at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
+    at.radio(key="sim_duration_choice").set_value(
+        streamlit_app.SHORT_TERM_DURATION_LABEL
+    ).run()
+    assert not at.exception
+
+    assert at.radio(key="sim_duration_choice").label.strip()
+    assert at.number_input(key="sim_duration_hours").label.strip()
+    _assert_all_widgets_labeled(at)
+    _assert_no_positive_tabindex(at)
+
+
 # ---------------------------------------------------------------------------
 # Feature gate -- end-to-end integration accessibility check
 # ---------------------------------------------------------------------------

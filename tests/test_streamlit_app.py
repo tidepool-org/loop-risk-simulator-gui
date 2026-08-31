@@ -11,6 +11,7 @@ separately-approved Phase 3 integration test plan, not duplicated here.
 
 import datetime
 import io
+import json
 import os
 import sys
 import zipfile
@@ -718,7 +719,9 @@ def test_the_config_download_zip_nests_under_one_folder():
     configs = meal_config.generate_configs(
         meal_config.MealConfigSpec.aligned(
             meal_config.MODE_STANDARD,
-            meal_config.EntrySet(meals=[meal_config.MealEntry(datetime.time(12, 0))]),
+            meal_config.EntrySet(
+                meals=[meal_config.MealEntry(datetime.datetime(2019, 8, 15, 12, 0))]
+            ),
         ),
         "TLR-20260806-143000",
     )
@@ -729,6 +732,197 @@ def test_the_config_download_zip_nests_under_one_folder():
         names = archive.namelist()
     assert len(names) == 4
     assert all(name.startswith("TLR-20260806-143000/") for name in names)
+
+
+# ---------------------------------------------------------------------------
+# Selectable simulation duration (TRSET-13)
+# ---------------------------------------------------------------------------
+
+OVERDELIVERY_LABEL = (
+    f"I expect this situation will result in overdelivery "
+    f"({meal_config.DURATION_OVERDELIVERY_HOURS:g} hours)"
+)
+FULL_DAY_LABEL = (
+    f"I'm interested in what happens over the course of a full day "
+    f"({meal_config.DURATION_FULL_DAY_HOURS:g} hours)"
+)
+
+
+def _captions(at):
+    return [c.value for c in at.caption]
+
+
+def _generate(at):
+    [b for b in at.button if b.label == "Generate configs"][0].click().run()
+
+
+def test_the_duration_picker_offers_the_four_ticket_options_vertically():
+    at = _editor_app()
+    duration = at.radio(key="sim_duration_choice")
+
+    assert duration.label == "Simulation duration"
+    assert duration.options == [
+        OVERDELIVERY_LABEL,
+        f"I expect this situation will result in underdelivery "
+        f"({meal_config.DURATION_UNDERDELIVERY_HOURS:g} hours)",
+        FULL_DAY_LABEL,
+        streamlit_app.SHORT_TERM_DURATION_LABEL,
+    ]
+    # A vertical radio: st.radio's default, i.e. never rendered horizontal.
+    assert duration.horizontal is False
+    # Overdelivery leads, so the editor opens on the base config's own 8 hours.
+    assert duration.value == OVERDELIVERY_LABEL
+
+
+def test_the_short_term_option_reveals_a_bounded_input_and_states_the_caveat():
+    at = _editor_app()
+    assert "sim_duration_hours" not in at.session_state
+
+    at.radio(key="sim_duration_choice").set_value(
+        streamlit_app.SHORT_TERM_DURATION_LABEL
+    ).run()
+
+    hours = at.number_input(key="sim_duration_hours")
+    assert hours.label == "Short-term simulation duration (hours)"
+    assert hours.min == meal_config.SHORT_TERM_MIN_HOURS
+    assert hours.max == meal_config.SHORT_TERM_MAX_HOURS
+    assert hours.step == meal_config.SHORT_TERM_STEP_HOURS
+    assert meal_config.SHORT_DURATION_CAVEAT in _captions(at)
+
+
+def test_a_short_term_value_off_the_step_is_rejected_naming_the_bound():
+    """The widget bounds the range; only a typed off-step value reaches here."""
+    at = _editor_app()
+    at.radio(key="sim_duration_choice").set_value(
+        streamlit_app.SHORT_TERM_DURATION_LABEL
+    ).run()
+    at.number_input(key="sim_duration_hours").set_value(3.1).run()
+
+    assert not at.exception
+    assert any("multiple of 0.5 hours" in e.value for e in at.error), [
+        e.value for e in at.error
+    ]
+    assert not [b for b in at.button if b.label == "Generate configs"]
+
+
+def test_the_long_run_cost_is_stated_next_to_the_picker():
+    assert streamlit_app.LONG_RUN_COST_NOTE in _captions(_editor_app())
+
+
+def test_the_window_caption_is_recomputed_when_the_duration_changes():
+    at = _editor_app()
+    assert any("12:00-20:00 (8 hours)" in c for c in _captions(at)), _captions(at)
+
+    at.radio(key="sim_duration_choice").set_value(FULL_DAY_LABEL).run()
+
+    captions = _captions(at)
+    assert any("24 hours" in c and "8/16/2019" in c for c in captions), captions
+    # The authoring bound, and why it differs from the run.
+    assert any("start day" in c and "past midnight" in c for c in captions), captions
+
+
+def test_the_selected_duration_reaches_every_generated_override():
+    at = _editor_app()
+    at.radio(key="sim_duration_choice").set_value(FULL_DAY_LABEL).run()
+    at.number_input(key="pm_bolus_units_0").set_value(3.3).run()
+    _generate(at)
+
+    assert not at.error, [e.value for e in at.error]
+    for filename, config in at.session_state["generated_configs"].items():
+        assert [o["duration_hours"] for o in config["override_config"]] == [
+            meal_config.DURATION_FULL_DAY_HOURS
+        ] * 3, filename
+
+
+def test_the_generated_summary_states_the_duration():
+    at = _editor_app()
+    at.number_input(key="pm_bolus_units_0").set_value(3.3).run()
+    _generate(at)
+
+    assert "Simulation duration: 8 hours per stage." in _captions(at), _captions(at)
+
+
+def test_changing_the_duration_invalidates_an_already_generated_config_set():
+    """A set built for a question the picker no longer asks must not be runnable."""
+    at = _editor_app()
+    at.number_input(key="pm_bolus_units_0").set_value(3.3).run()
+    _generate(at)
+    assert at.session_state["generated_configs"] is not None, "precondition"
+    assert [b for b in at.button if b.label == "Run Tool"], "precondition"
+
+    at.radio(key="sim_duration_choice").set_value(FULL_DAY_LABEL).run()
+
+    assert at.session_state["generated_configs"] is None
+    assert at.session_state["generated_duration_hours"] is None
+    assert not [b for b in at.button if b.label == "Run Tool"]
+    assert not [d for d in at.download_button if d.label == "Download configs (.zip)"]
+
+
+def test_regenerating_at_the_same_duration_keeps_the_set():
+    """Guards the test above against passing for any rerun rather than a change."""
+    at = _editor_app()
+    at.number_input(key="pm_bolus_units_0").set_value(3.3).run()
+    _generate(at)
+    risk_id = at.session_state["generated_risk_id"]
+
+    at.radio(key="sim_duration_choice").set_value(OVERDELIVERY_LABEL).run()
+
+    assert at.session_state["generated_risk_id"] == risk_id
+    assert at.session_state["generated_configs"] is not None
+
+
+def _app_showing_a_run_of(duration_hours):
+    """An app displaying a completed generated run of the given duration."""
+    config = {
+        "override_config": [{"sim_id": "pre-Loop_NoMitigations_t1_median",
+                             "duration_hours": duration_hours}],
+    }
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.session_state["run_result"] = RunResult(
+        save_dir="/tmp/Risk_Run_duration",
+        risk_dir_results=[RiskDirRunResult("TLR-DUR", _make_fake_assessment(), [], {})],
+    )
+    at.session_state["run_generated_configs"] = (
+        ("Simulation-Configuration-TLR-DUR_Median_Profile.json",
+         json.dumps(config).encode("utf-8")),
+    )
+    at.run()
+    return at
+
+
+def test_a_sub_eight_hour_runs_metrics_are_marked_not_valid_in_the_results():
+    at = _app_showing_a_run_of(2.0)
+
+    assert not at.exception
+    stage_df = at.dataframe[0].value
+    for column in streamlit_app.INVALIDATED_METRIC_COLUMNS:
+        assert (stage_df[column] == streamlit_app.SUB_MINIMUM_DURATION_CELL).all(), column
+    # Only those: the metrics the caveat does not name are untouched.
+    assert stage_df["TIR %"].iloc[0] == "70.0"
+    assert stage_df["TBR %"].iloc[0] == "10.0"
+    assert meal_config.SHORT_DURATION_CAVEAT in _captions(at)
+
+
+def test_an_eight_hour_runs_metrics_are_left_alone():
+    at = _app_showing_a_run_of(meal_config.DURATION_OVERDELIVERY_HOURS)
+
+    stage_df = at.dataframe[0].value
+    assert stage_df["Severity"].iloc[0] == "3"
+    assert stage_df["LBGI"].iloc[0] == "2.5"
+    assert stage_df["DKAI"].iloc[0] == "21.91"
+    assert meal_config.SHORT_DURATION_CAVEAT not in _captions(at)
+
+
+def test_a_library_run_is_never_marked_since_this_feature_did_not_set_its_duration():
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.session_state["run_result"] = RunResult(
+        save_dir="/tmp/Risk_Run_library",
+        risk_dir_results=[RiskDirRunResult("TLR-LIB", _make_fake_assessment(), [], {})],
+    )
+    at.run()
+
+    assert at.dataframe[0].value["Severity"].iloc[0] == "3"
+    assert meal_config.SHORT_DURATION_CAVEAT not in _captions(at)
 
 
 # ---------------------------------------------------------------------------
