@@ -453,3 +453,47 @@ marker overhang the axes by half a glyph; that is the intent (the alternative, p
 the x-limits, would reintroduce the empty forward gutter TRSET-22 removed). This
 touches the TRSET-22/23 renderer, not TRSET-9 code — the clipping predates this
 branch; TRSET-9 only made it prominent by defaulting meals to simulation start.
+
+## Catastrophic-findings severity on a short run (TRSET-30, TRSET-13 follow-up)
+
+**What changed (≤100 words):** TRSET-13 AC 11 scoped the sub-8-hour "not valid"
+marking to the per-stage table. The *Catastrophic findings (severity 4→5)* table in
+the same expander kept stating an `updated_severity` derived from the same LBGI, so
+the two tables contradicted each other on a short run. That column now carries
+`SUB_MINIMUM_DURATION_CELL` when `meal_config.metrics_are_valid()` is False, under a
+caption saying the row *set* is LBGI-gated too. `sim_id`, `stage` and `condition`
+still render: `condition` is read from the BG trace and holds at any duration.
+Presentation only — `streamlit_app.py` alone, no `severity_model` change.
+
+Example:
+
+```bash
+streamlit run streamlit_app.py     # Simulation duration -> Short term (2 h) -> Generate configs -> Run Tool
+```
+
+```python
+import streamlit_app
+streamlit_app.INVALIDATED_CATASTROPHIC_COLUMNS   # ("updated_severity",)
+streamlit_app._render_catastrophic_table(findings, metrics_valid=False)
+```
+
+**Validation (≤100 words):** Six AppTest cases in `tests/test_streamlit_app.py`,
+beside the TRSET-13 marking test, over a fixture holding both an escalated row
+(`zero_or_negative`, 5) and an unescalated one (`none`, 4) — the pair proves the
+marking is not keyed on the escalated value. Covered: marked at 2 h; rows and
+`condition` survive rather than being suppressed; the row-set caption is present;
+the `SeverityAssessment` is not mutated; unchanged at 8 h and on a library run
+(no known duration). Mutation-checked — reverting `streamlit_app.py` fails four of
+the six. Affected suites: 196 passed, 1 deselected, no new failures.
+
+**Cautions / limitations:** Marking only. A short run's catastrophic findings still
+reach the RTF summaries and the export zip unmarked — the same carve-out TRSET-13
+recorded, still open, still to be raised separately before an exported short run is
+treated as a record. The row set is *reported* unreliable, not corrected: severity_model
+selects rows on `lbgi_risk_score == 4` before `check_catastrophic_conditions` ever
+runs, so a sim the short run mis-scored is never assessed for escalation at all, and
+no view-layer change can recover it. `extended_low` needs 48 consecutive readings
+under 40 mg/dL (4 hours at 5-minute steps), so it is unreachable below a ~4-hour run
+while `zero_or_negative` is reachable at any length — the table's two conditions are
+not equally available on short runs. Marking is keyed on the duration snapshot taken
+at run start (`_run_duration_hours`), so a library run is never marked.

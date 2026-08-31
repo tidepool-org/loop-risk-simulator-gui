@@ -26,7 +26,7 @@ sys.path.insert(0, "post_processing")
 # directly for unit testing, independent of the AppTest exec harness.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tidepool_data_science_simulator.projects.risk.gui_runner import RunResult, RiskDirRunResult  # noqa: E402
-from severity_model import SeverityAssessment, StageResult  # noqa: E402
+from severity_model import CatastrophicFinding, SeverityAssessment, StageResult  # noqa: E402
 from streamlit_app import _export_chart_files, _profile_label, _profile_stage_rows  # noqa: E402
 import meal_config  # noqa: E402
 import streamlit_app  # noqa: E402
@@ -871,7 +871,7 @@ def test_regenerating_at_the_same_duration_keeps_the_set():
     assert at.session_state["generated_configs"] is not None
 
 
-def _app_showing_a_run_of(duration_hours):
+def _app_showing_a_run_of(duration_hours, assessment=None):
     """An app displaying a completed generated run of the given duration."""
     config = {
         "override_config": [{"sim_id": "pre-Loop_NoMitigations_t1_median",
@@ -880,7 +880,9 @@ def _app_showing_a_run_of(duration_hours):
     at = AppTest.from_file("streamlit_app.py", default_timeout=60)
     at.session_state["run_result"] = RunResult(
         save_dir="/tmp/Risk_Run_duration",
-        risk_dir_results=[RiskDirRunResult("TLR-DUR", _make_fake_assessment(), [], {})],
+        risk_dir_results=[
+            RiskDirRunResult("TLR-DUR", assessment or _make_fake_assessment(), [], {})
+        ],
     )
     at.session_state["run_generated_configs"] = (
         ("Simulation-Configuration-TLR-DUR_Median_Profile.json",
@@ -911,6 +913,98 @@ def test_an_eight_hour_runs_metrics_are_left_alone():
     assert stage_df["LBGI"].iloc[0] == "2.5"
     assert stage_df["DKAI"].iloc[0] == "21.91"
     assert meal_config.SHORT_DURATION_CAVEAT not in _captions(at)
+
+
+# ---------------------------------------------------------------------------
+# TRSET-30 -- the same marking on the catastrophic-findings table, which reports
+# a severity derived from the very LBGI the stage table above declares invalid.
+# ---------------------------------------------------------------------------
+
+def _assessment_with_catastrophic_findings():
+    """A fake assessment carrying one escalated (5) and one unescalated (4) row.
+
+    Both are needed: the 4 IS the sim's lbgi_risk_score verbatim, while the 5 was
+    escalated off the BG trace. Neither may state a severity on a short run, but
+    only the pair proves the marking is not keyed on the escalated value.
+    """
+    assessment = _make_fake_assessment()
+    assessment.catastrophic_findings = [
+        CatastrophicFinding(
+            sim_id="pre-Loop_NoMitigations_t1_median", stage="pre",
+            condition="zero_or_negative", updated_severity=5,
+        ),
+        CatastrophicFinding(
+            sim_id="post-Loop_NoMitigations_t1_median", stage="post",
+            condition="none", updated_severity=4,
+        ),
+    ]
+    return assessment
+
+
+def _catastrophic_table(at):
+    """The catastrophic-findings dataframe: rendered right after the stage table."""
+    return at.dataframe[1].value
+
+
+def test_a_sub_eight_hour_runs_catastrophic_severity_is_marked_not_valid():
+    at = _app_showing_a_run_of(2.0, _assessment_with_catastrophic_findings())
+
+    assert not at.exception
+    table = _catastrophic_table(at)
+    for column in streamlit_app.INVALIDATED_CATASTROPHIC_COLUMNS:
+        assert (table[column] == streamlit_app.SUB_MINIMUM_DURATION_CELL).all(), column
+
+
+def test_a_sub_eight_hour_runs_catastrophic_findings_are_marked_not_suppressed():
+    """The trace-read columns survive: they mean the same thing at any duration."""
+    at = _app_showing_a_run_of(2.0, _assessment_with_catastrophic_findings())
+
+    table = _catastrophic_table(at)
+    assert len(table) == 2
+    assert list(table["condition"]) == ["zero_or_negative", "none"]
+    assert list(table["stage"]) == ["pre", "post"]
+    assert table["sim_id"].iloc[0] == "pre-Loop_NoMitigations_t1_median"
+
+
+def test_a_sub_eight_hour_run_says_the_catastrophic_row_set_is_unreliable_too():
+    """Marking the cell alone would imply the rows themselves can be trusted."""
+    at = _app_showing_a_run_of(2.0, _assessment_with_catastrophic_findings())
+
+    assert streamlit_app.SUB_MINIMUM_DURATION_ROW_SET_CAVEAT in _captions(at)
+
+
+def test_marking_the_catastrophic_table_does_not_mutate_the_assessment():
+    """Presentation only -- the RTF summaries read these same objects."""
+    assessment = _assessment_with_catastrophic_findings()
+    _app_showing_a_run_of(2.0, assessment)
+
+    assert [f.updated_severity for f in assessment.catastrophic_findings] == [5, 4]
+
+
+def test_an_eight_hour_runs_catastrophic_findings_are_left_alone():
+    at = _app_showing_a_run_of(
+        meal_config.DURATION_OVERDELIVERY_HOURS, _assessment_with_catastrophic_findings()
+    )
+
+    table = _catastrophic_table(at)
+    assert list(table["updated_severity"]) == [5, 4]
+    assert streamlit_app.SUB_MINIMUM_DURATION_ROW_SET_CAVEAT not in _captions(at)
+
+
+def test_a_library_runs_catastrophic_findings_are_left_alone():
+    """No generated configs means no known duration -- nothing to claim either way."""
+    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at.session_state["run_result"] = RunResult(
+        save_dir="/tmp/Risk_Run_library",
+        risk_dir_results=[
+            RiskDirRunResult("TLR-LIB", _assessment_with_catastrophic_findings(), [], {})
+        ],
+    )
+    at.run()
+
+    assert not at.exception
+    assert list(_catastrophic_table(at)["updated_severity"]) == [5, 4]
+    assert streamlit_app.SUB_MINIMUM_DURATION_ROW_SET_CAVEAT not in _captions(at)
 
 
 def test_a_library_run_is_never_marked_since_this_feature_did_not_set_its_duration():
