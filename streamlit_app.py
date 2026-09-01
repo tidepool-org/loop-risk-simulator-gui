@@ -43,6 +43,10 @@ from export_bundle import build_export_zip, chart_filename
 # reasoning as export_bundle: streamlit-free, so the generated JSON is asserted
 # directly rather than through AppTest.
 import meal_config
+# The start page (TRSET-34): a self-contained, zero-argument page module. It owns
+# its own text and knows nothing about the session gate below that gives it
+# priority over the tool on a fresh session.
+import start_page
 
 # Root of the config library the selector browses. Defaults to the simulator's
 # in-tree scenario_configs (correct for an editable/sibling install). Under the
@@ -69,6 +73,13 @@ LOGO_BASELINE_WIDTH_PX = 160
 LOGO_SCALE = 1.5
 LOGO_WIDTH_PX = round(LOGO_BASELINE_WIDTH_PX * LOGO_SCALE)  # 240
 LOGO_ALT_TEXT = "Tidepool logo"
+
+# Session-state flag for the TRSET-34 start-page gate: False until the user
+# clicks through the start page, and never persisted beyond the session (a
+# refresh is a new session and shows the page again -- deliberate, per the
+# ticket). Seeded in _init_session_state()'s defaults, which only fills keys
+# that are absent, so once set it survives every later rerun.
+START_PAGE_ACK_KEY = "start_page_acknowledged"
 
 # Regulatory disclaimer banner (TRSET-5). Verbatim, non-clinical-status text,
 # defined once (DRY) and rendered as a custom caution box at the top of the
@@ -913,6 +924,11 @@ def _render_export_control(run_result) -> None:
 
 def _init_session_state():
     defaults = {
+        # The start-page gate (TRSET-34). Seeded here rather than at the gate so
+        # it goes through the same only-if-absent path as every other key: a
+        # later rerun re-enters this function and must not clobber an
+        # acknowledgement already given.
+        START_PAGE_ACK_KEY: False,
         "cancel_event": None,
         "run_thread": None,
         "progress": None,  # (completed, total, risk_dir_name)
@@ -1216,6 +1232,20 @@ def main():
     if os.path.exists(LOGO_PATH):
         _render_logo()
     _init_session_state()
+
+    # TRSET-34 start-page gate. Everything above runs for both pages, so the
+    # start page carries the same brand styling, the single role="alert"
+    # disclaimer banner and the logo. The page module renders the button but
+    # deliberately does not act on it -- the acknowledgement is this gate's
+    # business, so the page drops into st.Page unchanged when the multipage
+    # migration lands and this block goes away.
+    if not st.session_state[START_PAGE_ACK_KEY]:
+        start_page.render()
+        if st.session_state.get(start_page.ACKNOWLEDGE_BUTTON_KEY):
+            st.session_state[START_PAGE_ACK_KEY] = True
+            st.rerun()
+        return
+
     st.title("Tidepool Loop Risk Severity Estimation Tool")
     st.markdown(
         "Estimates the clinical risk severity of Tidepool Loop across a library of "

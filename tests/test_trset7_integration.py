@@ -30,7 +30,10 @@ import zipfile
 import pytest
 
 pytest.importorskip("streamlit")
-from streamlit.testing.v1 import AppTest  # noqa: E402
+# The shared AppTest factory (tests/conftest.py). It builds the harness with the
+# TRSET-34 start-page gate already acknowledged, so these suites drive the tool
+# directly, as they did before the start page existed.
+from conftest import make_app_test  # noqa: E402
 
 from tidepool_data_science_simulator.utils import PROJECT_ROOT_DIR  # noqa: E402
 from tidepool_data_science_simulator.projects.risk.gui_runner import (  # noqa: E402
@@ -315,7 +318,7 @@ def test_export_contains_nothing_from_outside_the_run_directory(
 # ---------------------------------------------------------------------------
 
 def test_app_exports_the_real_run_and_offers_a_valid_zip_for_download(real_run_result):
-    at = AppTest.from_file("streamlit_app.py", default_timeout=300)
+    at = make_app_test(default_timeout=300)
     # The real RunResult the runner returned, handed over exactly as the
     # background run thread hands it to the app.
     at.session_state["run_result"] = real_run_result

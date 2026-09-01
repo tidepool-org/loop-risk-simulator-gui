@@ -35,7 +35,10 @@ import time
 import pytest
 
 pytest.importorskip("streamlit")
-from streamlit.testing.v1 import AppTest  # noqa: E402
+# The shared AppTest factory (tests/conftest.py). It builds the harness with the
+# TRSET-34 start-page gate already acknowledged, so these suites drive the tool
+# directly, as they did before the start page existed.
+from conftest import make_app_test  # noqa: E402
 from tidepool_data_science_simulator.utils import PROJECT_ROOT_DIR  # noqa: E402
 
 # Phase 4 fixture relocation: previously these synthetic collections were written
@@ -195,7 +198,7 @@ def _click_run_and_wait(at, timeout=180):
 # ---------------------------------------------------------------------------
 
 def test_happy_path_all_three_stages_reach_the_gui_intact():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     _select_collection(at, REAL_COLLECTION)
     _select_single_directory(at, "TLR-QAE-482-test")
@@ -227,7 +230,7 @@ def test_happy_path_all_three_stages_reach_the_gui_intact():
 # ---------------------------------------------------------------------------
 
 def test_warnings_surfaced_before_run_and_do_not_block_it():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     _select_collection(at, FIXTURES_COLLECTION_NAME)
     _select_single_directory(at, "TLR-WARN-TEST")
@@ -242,7 +245,7 @@ def test_warnings_surfaced_before_run_and_do_not_block_it():
 # ---------------------------------------------------------------------------
 
 def test_errors_block_the_run():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     _select_collection(at, FIXTURES_COLLECTION_NAME)
     _select_single_directory(at, "TLR-ERR-TEST")
@@ -258,7 +261,7 @@ def test_errors_block_the_run():
 # ---------------------------------------------------------------------------
 
 def test_no_usable_data_surfaced_explicitly():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     _select_collection(at, FIXTURES_COLLECTION_NAME)
     _select_single_directory(at, "TLR-NODATA-TEST")
@@ -279,7 +282,7 @@ def test_no_usable_data_surfaced_explicitly():
 # ---------------------------------------------------------------------------
 
 def test_multi_tlr_aggregation_yields_one_assessment_per_directory():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=120)
+    at = make_app_test(default_timeout=120)
     at.run()
     _select_collection(at, MULTI_COLLECTION_NAME)
     # scope_choice defaults to "All directories in this collection" -- no
@@ -305,7 +308,7 @@ def test_multi_tlr_aggregation_yields_one_assessment_per_directory():
 # ---------------------------------------------------------------------------
 
 def test_cancel_mid_run_stops_before_completing_every_directory():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = make_app_test(default_timeout=60)
     at.run()
     _select_collection(at, MULTI_COLLECTION_NAME)
     # "All directories" scope -- 2 real dirs, enough headroom to cancel between them.

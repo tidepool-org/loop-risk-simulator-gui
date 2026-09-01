@@ -497,3 +497,44 @@ under 40 mg/dL (4 hours at 5-minute steps), so it is unreachable below a ~4-hour
 while `zero_or_negative` is reachable at any length — the table's two conditions are
 not equally available on short runs. Marking is keyed on the duration snapshot taken
 at run start (`_run_duration_hours`), so a library run is never marked.
+
+## Start page (TRSET-34)
+
+**What changed (≤100 words):** A start page now stands in front of the tool on a
+fresh session. It carries a purpose statement (risk exploration, not formal risk
+assessment; not medical software) and an AI code disclosure (the UI wrapper was
+written with AI assistance; TRSET itself is unmodified, and every change went
+through a human-defined, human-reviewed process). `Got it` advances to the app.
+It lives in its own `start_page.py` as verbatim text constants plus a
+zero-argument `render()`; the session gate is a few lines in `main()`. Page
+config, `_BRAND_CSS`, the disclaimer banner and the logo run above the gate, so
+both pages carry them.
+
+Example:
+
+```bash
+streamlit run streamlit_app.py     # start page first; Got it opens the tool
+```
+
+**Validation (≤100 words):** `tests/test_trset34_integration.py` — the Feature
+gate — drives the real app through `AppTest` in three phases: the unacknowledged
+first render (start page present, text asserted against the module constants,
+chrome present, no config radio/selectbox/results), a real `Got it` click
+(tool present, start page gone, still exactly one `role="alert"` banner), and
+the gate staying down across an unrelated widget change and repeated reruns —
+the `_init_session_state()` clobbering failure mode. `test_accessibility.py`
+gains start-page label/tabindex/alt-text/banner gates. Every other `AppTest`
+suite bypasses the gate through one `make_app_test` factory in
+`tests/conftest.py`. Full suite: 310 passed, 7 skipped.
+
+**Cautions / limitations:** Per-session only, by design — a refresh shows the page
+again, and nothing is persisted. No control returns to the start page once
+acknowledged. The page is not in the export bundle, so a reviewer holding an
+exported zip still sees no AI disclosure (separate ticket). The page title
+restates the app title ("Tidepool **Loop** Risk Severity Estimation Tool") while
+the purpose statement, reproduced verbatim, says "Tidepool Risk Severity
+Estimation Tool (TRSET)" — the naming inconsistency is deliberately not
+reconciled here (a third variant, "Evaluation", is in `DISCLAIMER_TEXT`).
+`st.navigation`/`st.Page` was deliberately not adopted: `AppTest` renders only
+the default page of a multipage app. `render()` takes no arguments and does not
+act on its own button, so that migration can adopt it unchanged.

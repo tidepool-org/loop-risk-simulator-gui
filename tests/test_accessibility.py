@@ -34,9 +34,16 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - env pins 3.12; kept honest rather than silently broken
     import tomli as tomllib  # type: ignore  # noqa: E402
 
+# The shared AppTest factory (tests/conftest.py). It builds the harness with the
+# TRSET-34 start-page gate already acknowledged, so these suites drive the tool
+# directly, as they did before the start page existed. The start-page gates at
+# the bottom of this file need the un-acknowledged render, so they build their
+# own AppTest instead.
+from conftest import make_app_test  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 sys.path.insert(0, "post_processing")
+import start_page  # noqa: E402
 import streamlit_app  # noqa: E402
 from tidepool_data_science_simulator.projects.risk.gui_runner import (  # noqa: E402
     RunResult,
@@ -190,7 +197,7 @@ def test_every_value_box_widget_the_app_renders_is_covered_by_the_override():
     """
     overridden = set(re.findall(r'\[data-testid="(st\w+)"\]', streamlit_app._BRAND_CSS))
 
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = make_app_test(default_timeout=60)
     at.run()
     at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
     assert not at.exception
@@ -252,7 +259,7 @@ def test_disclaimer_banner_reuses_existing_palette_tokens():
 def test_disclaimer_banner_not_conveyed_by_color_alone():
     # WCAG 1.3: the disclaimer's meaning is carried by an alert semantic and the
     # explicit "not medical software" / "must not" wording, not color alone.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
     banners = [m for m in at.markdown if 'role="alert"' in m.value]
@@ -268,7 +275,7 @@ def test_disclaimer_banner_not_conveyed_by_color_alone():
 def test_all_interactive_widgets_have_accessible_labels():
     # Serves both 2.1 (a keyboard user needs a programmatic name for each control)
     # and 1.3 (label is programmatically associated), so it is asserted once.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
     _assert_all_widgets_labeled(at)
@@ -277,7 +284,7 @@ def test_all_interactive_widgets_have_accessible_labels():
 def test_unsafe_html_blocks_introduce_no_keyboard_trap():
     # The app's only unsafe_allow_html output is _BRAND_CSS and the logo <img>;
     # neither may inject a positive tabindex that would break natural tab order.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
     _assert_no_positive_tabindex(at)
@@ -286,7 +293,7 @@ def test_unsafe_html_blocks_introduce_no_keyboard_trap():
 def test_all_emitted_images_carry_alt_text():
     # WCAG 1.3: non-text content the app emits has a text alternative. Generalizes
     # the TRSET-3 logo-alt guard to any <img> the app adds later.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
     _assert_all_images_have_alt(at)
@@ -305,7 +312,7 @@ def test_severity_information_is_conveyed_as_text_not_color_alone():
         risk_dir_results=[RiskDirRunResult("TLR-CAT", _make_assessment_with_catastrophic(), [])],
         cancelled=False,
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = fake_result
     at.run()
     assert not at.exception
@@ -323,7 +330,7 @@ def test_the_duration_pickers_widgets_carry_accessible_labels():
     # widgets the feature adds. The generic gate above renders only the default
     # (library) source, so neither is reachable there -- this drives the editor to
     # the state where both exist and re-runs the same label assertion over it.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = make_app_test(default_timeout=60)
     at.run()
     at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
     at.radio(key="sim_duration_choice").set_value(
@@ -346,7 +353,7 @@ def test_integration_full_app_run_is_accessible():
     # library (mirroring test_integration_full_app_run_renders_header_and_logo in
     # test_streamlit_app.py), asserting the three accessibility markers at the
     # full-system rendered-tree boundary -- not against a mocked result.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
 
@@ -356,3 +363,58 @@ def test_integration_full_app_run_is_accessible():
     _assert_all_images_have_alt(at)
     # 2.1: no keyboard trap injected by the app's unsafe_allow_html.
     _assert_no_positive_tabindex(at)
+
+
+# ---------------------------------------------------------------------------
+# TRSET-34 -- the start page, which is a second page and so needs its own pass
+# ---------------------------------------------------------------------------
+
+def _start_page_app():
+    """The un-acknowledged first render: the start page, not the tool.
+
+    Deliberately not make_app_test -- that factory's whole job is to skip past
+    the page this section is here to check.
+    """
+    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at.run()
+    assert not at.exception
+    assert at.button[0].label == start_page.ACKNOWLEDGE_LABEL, (
+        "expected the un-acknowledged render to be the start page"
+    )
+    return at
+
+
+def test_start_page_interactive_widgets_have_accessible_labels():
+    # 2.1 + 1.3, applied to the start page: its one control must carry a
+    # programmatic name like every control on the tool page does.
+    _assert_all_widgets_labeled(_start_page_app())
+
+
+def test_start_page_introduces_no_keyboard_trap():
+    # 2.1: the start page emits no raw HTML of its own, so the only markup in
+    # this render is the shared chrome -- but the gate is asserted here rather
+    # than inferred, so a future raw-HTML block on the page cannot slip a
+    # positive tabindex in unnoticed.
+    _assert_no_positive_tabindex(_start_page_app())
+
+
+def test_start_page_emitted_images_carry_alt_text():
+    # 1.3: the logo renders above the gate, so the start page carries the same
+    # alt-text guarantee the tool page does.
+    at = _start_page_app()
+    _assert_all_images_have_alt(at)
+    logo_imgs = [
+        m for m in at.markdown
+        if "<img" in m.value and f'alt="{streamlit_app.LOGO_ALT_TEXT}"' in m.value
+    ]
+    assert len(logo_imgs) == 1, "expected exactly one logo <img> with the sanctioned alt text"
+
+
+def test_start_page_disclaimer_banner_not_conveyed_by_color_alone():
+    # WCAG 1.3, and the "exactly one role=alert banner per render" invariant the
+    # tool-page gate above depends on -- the start page must not add a second.
+    at = _start_page_app()
+    banners = [m for m in at.markdown if 'role="alert"' in m.value]
+    assert len(banners) == 1, "expected exactly one role=alert disclaimer banner"
+    value = banners[0].value.lower()
+    assert "not medical software" in value and "must not" in value

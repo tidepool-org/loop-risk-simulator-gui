@@ -26,3 +26,35 @@ _derived_pp = os.path.join(_SIMULATOR_ROOT, "post_processing")
 _POST_PROCESSING_DIR = _env_pp if _env_pp else _derived_pp
 if os.path.isdir(_POST_PROCESSING_DIR) and _POST_PROCESSING_DIR not in sys.path:
     sys.path.insert(0, _POST_PROCESSING_DIR)
+
+
+# Project root (holds streamlit_app.py), so the factory below can import the app
+# module and resolve its path without depending on the working directory.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+APP_PATH = os.path.join(_PROJECT_ROOT, "streamlit_app.py")
+
+
+def make_app_test(path=None, default_timeout=30):
+    """Build an ``AppTest`` for the app with the TRSET-34 start page already
+    acknowledged, so the harness lands on the tool the way it did before the
+    start page existed.
+
+    Every existing suite goes through here rather than repeating the flag: the
+    gate is bypassed in exactly one place, and the day it moves (the multipage
+    migration) there is one line to change. TRSET-34's own integration test
+    deliberately does NOT use this -- it drives the real, unacknowledged first
+    render and clicks the real button.
+
+    Imported lazily so this conftest stays importable in an environment without
+    streamlit (the streamlit suites already guard themselves with
+    ``pytest.importorskip``); the non-streamlit suites must still collect.
+    """
+    from streamlit.testing.v1 import AppTest
+    import streamlit_app
+
+    at = AppTest.from_file(path or APP_PATH, default_timeout=default_timeout)
+    at.session_state[streamlit_app.START_PAGE_ACK_KEY] = True
+    return at
