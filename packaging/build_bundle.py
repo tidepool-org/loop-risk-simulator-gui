@@ -24,9 +24,12 @@ directory, so a dirty checkout cannot leak into the bundle.
 Publishing is NOT performed here: `build` prints the exact `gh release create`
 command for a maintainer to run (an outward, irreversible action).
 
+The release number comes from version.py's APP_VERSION -- the same constant the
+app displays -- so the archive name, the version stamp and the release tag cannot
+disagree with the running app. --version is optional and, if given, must match.
+
 Usage:
     python packaging/build_bundle.py build \\
-        --version 0.1.0 \\
         --simulator-ref main \\
         --simulator-repo ../data-science-simulator \\
         --swift-repo ../LoopAlgorithmToPython \\
@@ -36,15 +39,26 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import glob
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
-from typing import List
+from typing import Dict, List, Optional, Set
+
+# The single source of the release number, shared with the running app. version.py
+# is import-safe from here by design -- a bare string constant with no third-party
+# imports -- unlike streamlit_app.py, which would pull streamlit, pandas and the
+# simulator into the build. It lives at the repo root, one level above this file.
+_BUILDER_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BUILDER_REPO_ROOT not in sys.path:
+    sys.path.insert(0, _BUILDER_REPO_ROOT)
+from version import APP_VERSION  # noqa: E402
 
 # Paths (relative to the simulator repo root) that the installed simulator
 # package does NOT carry but the GUI needs at runtime -- extracted from the pin.
@@ -58,13 +72,27 @@ SIMULATOR_VENDOR_PATHS: List[str] = [
 ]
 
 # Files/dirs copied verbatim from the GUI repo into the bundle.
+# Every local module streamlit_app.py imports must appear here or the bundle
+# raises ImportError on first run -- verify_app_artifacts_complete() below is the
+# guard that makes that a build-time failure instead of a first-double-click one.
+# pytest.ini rides along with tests/ so the bundled suite runs under the same
+# marker config as the repo (its `-m "not slow"` deselects the real 24h run).
 APP_ARTIFACTS: List[str] = [
     "streamlit_app.py",
+    "export_bundle.py",
+    "loop_home_renderer.py",
+    "meal_config.py",
+    "start_page.py",
+    "version.py",
     "Tidepool_Logo_Light_Large_3000.jpg",
     "README.md",
     ".streamlit",
+    "pytest.ini",
     "tests",
 ]
+
+# The app module the guard starts from: the bundle's entry point.
+APP_ENTRY_POINT = "streamlit_app.py"
 
 BUNDLE_ENV_FILENAME = "conda-environment.yml"
 SWIFT_VENDOR_RELPATH = "./vendor/LoopAlgorithmToPython"
@@ -163,6 +191,117 @@ def stage_app_code(app_repo: str, dest: str, artifacts: List[str]) -> None:
             shutil.copy2(src, target)
 
 
+def _module_level_imports(source_path: str) -> Set[str]:
+    """Top-level module names imported at module level by the file at `source_path`.
+
+    Parsed with `ast`, never executed and never imported: the builder is
+    stdlib-only, and importing streamlit_app here would pull streamlit, pandas and
+    the simulator into the build. Only statements in the module body are read --
+    an import nested inside a function or an `if` is not seen (bounded on purpose;
+    the failure this guards is the module-level import that makes the bundle die
+    before it renders).
+    """
+    with open(source_path) as fh:
+        tree = ast.parse(fh.read(), filename=source_path)
+
+    names: Set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+def _local_module_artifact(app_repo: str, module: str) -> Optional[str]:
+    """The artifact name that stages `module`, or None if it is not a local module.
+
+    "Local" is decided by what exists in the app repo -- a second hardcoded list of
+    module names would be the same drift defect one level up.
+    """
+    if os.path.isfile(os.path.join(app_repo, f"{module}.py")):
+        return f"{module}.py"
+    if os.path.isfile(os.path.join(app_repo, module, "__init__.py")):
+        return module
+    return None
+
+
+def _local_imports(app_repo: str, source_path: str) -> Dict[str, str]:
+    """{module name: artifact name} for the local modules `source_path` imports."""
+    found: Dict[str, str] = {}
+    for name in _module_level_imports(source_path):
+        artifact = _local_module_artifact(app_repo, name)
+        if artifact is not None:
+            found[name] = artifact
+    return found
+
+
+def verify_app_artifacts_complete(
+    app_repo: str, artifacts: List[str], entry_point: str = APP_ENTRY_POINT
+) -> None:
+    """Raise if a local module the app imports would not be staged into the bundle.
+
+    `stage_app_code` only raises for artifacts it was TOLD to copy, so a module
+    missing from `artifacts` produces a bundle that builds cleanly and then dies
+    with ImportError on the colleague's first double-click. This turns that into a
+    build-time failure. TRSET-7, TRSET-9, TRSET-22 and TRSET-34 each added a module
+    without updating the list; adding their four names fixes today, this stops the
+    next one.
+
+    Scope is one level of indirection, explicitly bounded: the entry point's own
+    local imports, plus the local imports of each module it imports. Not a full
+    dependency walk.
+    """
+    staged = set(artifacts)
+    missing: Dict[str, str] = {}  # artifact -> the file that imports it
+
+    if entry_point not in staged:
+        missing[entry_point] = "the bundle entry point"
+
+    direct = _local_imports(app_repo, os.path.join(app_repo, entry_point))
+    for artifact in direct.values():
+        if artifact not in staged:
+            missing.setdefault(artifact, entry_point)
+
+    for module, artifact in sorted(direct.items()):
+        module_path = os.path.join(app_repo, f"{module}.py")
+        if not os.path.isfile(module_path):
+            continue  # a package: its own modules ship inside the staged directory
+        for sub_artifact in _local_imports(app_repo, module_path).values():
+            if sub_artifact not in staged:
+                missing.setdefault(sub_artifact, f"{module}.py")
+
+    if missing:
+        detail = "; ".join(
+            f"{artifact} (imported by {importer})" for artifact, importer in sorted(missing.items())
+        )
+        raise ValueError(
+            f"App artifacts incomplete -- the bundle would raise ImportError on "
+            f"first run: {detail}. Add the missing name(s) to APP_ARTIFACTS in "
+            f"packaging/build_bundle.py."
+        )
+
+
+def resolve_version(version: Optional[str] = None) -> str:
+    """The bundle's version: APP_VERSION, unless explicitly given and in agreement.
+
+    The archive name, BUNDLE_VERSION.json's bundle_version and the release tag all
+    come from here, so one constant governs the number the app displays and the
+    number its bundle is published under. An explicit --version that disagrees is
+    exactly the drift this collapses, so it raises rather than quietly winning.
+    """
+    if version is None:
+        return APP_VERSION
+    if version != APP_VERSION:
+        raise ValueError(
+            f"--version {version} disagrees with APP_VERSION {APP_VERSION} in "
+            f"version.py. version.py is the single source of the release number: "
+            f"bump it there, or omit --version."
+        )
+    return version
+
+
 def _strip_prebuilt_dylibs(root: str) -> List[str]:
     """Remove every ``*.dylib`` under ``root``; return the removed paths (sorted).
 
@@ -219,7 +358,7 @@ def publish_command(asset_path: str, bundle_version: str, gui_repo_slug: str) ->
 
 def build_bundle(
     *,
-    version: str,
+    version: Optional[str] = None,
     simulator_ref: str,
     simulator_repo: str,
     swift_repo: str,
@@ -232,6 +371,12 @@ def build_bundle(
 
     Orchestration only -- each step is a single-responsibility helper above.
     """
+    # Fail before any git or staging work: a build that would produce a bundle
+    # dead on first run, or one numbered differently from the app inside it,
+    # should not produce an archive at all.
+    verify_app_artifacts_complete(app_repo, APP_ARTIFACTS)
+    version = resolve_version(version)
+
     bundle_name = f"loop-risk-simulator-gui-{version}"
     simulator_sha = resolve_ref(simulator_repo, simulator_ref)
     swift_sha = resolve_ref(swift_repo, swift_ref)
@@ -296,7 +441,14 @@ def main(argv: List[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     b = sub.add_parser("build", help="Build the versioned bundle archive.")
-    b.add_argument("--version", required=True, help="Bundle version, e.g. 0.1.0")
+    b.add_argument(
+        "--version",
+        default=None,
+        help=(
+            f"Bundle version. Defaults to APP_VERSION ({APP_VERSION}) from version.py, "
+            f"which is also what the app displays; passing a different value is an error."
+        ),
+    )
     b.add_argument("--simulator-ref", default="main", help="data-science-simulator git ref to build against (default: main; the build still records the resolved SHA in the version stamp).")
     b.add_argument("--simulator-repo", default="../data-science-simulator", help="Local data-science-simulator checkout.")
     b.add_argument("--swift-repo", default="../LoopAlgorithmToPython", help="Local LoopAlgorithmToPython checkout.")
@@ -320,7 +472,7 @@ def main(argv: List[str] | None = None) -> int:
         )
         print(json.dumps(stamp, indent=2, sort_keys=True))
         print("\nBundle built. To publish (run this yourself -- not done automatically):\n")
-        print("  " + publish_command(stamp["archive_path"], args.version, args.gui_repo_slug))
+        print("  " + publish_command(stamp["archive_path"], stamp["bundle_version"], args.gui_repo_slug))
         return 0
 
     return 1

@@ -8,9 +8,15 @@ and launches. This is the test the code request names ("a bundle built by the
 new tooling actually resolves the pinned simulator and launches").
 
 It is heavy (needs a real built bundle + conda env) so it is OPT-IN: skipped
-unless LOOP_RISK_GUI_BUNDLE_DIR points at an extracted bundle. Run it with the
-BUNDLE ENV's own interpreter from a neutral cwd (not the simulator checkout,
-which would shadow the pinned install):
+unless LOOP_RISK_GUI_BUNDLE_DIR points at an extracted bundle. Being opt-in is
+also why the TRSET-47 defect shipped: this is the ONLY test that runs the bundled
+app, and while it sat skipped, four modules were added to the app without being
+added to APP_ARTIFACTS. Running it against a freshly built bundle is a REQUIRED
+PUBLISH STEP, not an optional one -- the build-time guard in build_bundle.py
+catches a missing import, not a bundle that fails to launch for any other reason.
+
+Run it with the BUNDLE ENV's own interpreter from a neutral cwd (not the
+simulator checkout, which would shadow the pinned install):
 
     export LOOP_RISK_GUI_BUNDLE_DIR=/path/to/extracted/bundle
     cd /tmp && ~/miniconda3/envs/<bundle-env>/bin/python -m pytest \\
@@ -31,7 +37,14 @@ BUNDLE_DIR = os.environ.get("LOOP_RISK_GUI_BUNDLE_DIR")
 
 pytestmark = pytest.mark.skipif(
     not BUNDLE_DIR,
-    reason="Set LOOP_RISK_GUI_BUNDLE_DIR (extracted bundle) to run the Phase 4 bundle-boundary test.",
+    reason=(
+        "Set LOOP_RISK_GUI_BUNDLE_DIR (extracted bundle) to run the Phase 4 "
+        "bundle-boundary test. THIS SUITE IS THE ONLY CHECK THAT A BUILT BUNDLE "
+        "ACTUALLY LAUNCHES -- run it against a freshly built bundle before "
+        "publishing one (README, 'Packaging a release bundle'). It was skipped "
+        "continuously from TRSET-7 to TRSET-47, during which the builder shipped a "
+        "bundle that died on first run with ImportError."
+    ),
 )
 
 EXPECTED_SIMULATOR_REF = "main"

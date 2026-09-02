@@ -82,6 +82,18 @@ def contrast_ratio(fg: str, bg: str) -> float:
     return (lums[1] + 0.05) / (lums[0] + 0.05)
 
 
+def composite_over(fg: str, bg: str, alpha: float) -> str:
+    """The #RRGGBB a translucent `fg` actually renders as over an opaque `bg`.
+
+    Streamlit fades some text with CSS `opacity` rather than a pre-composited
+    color token, so the pair WCAG applies to is the composite, not the declared
+    color. Measured in a running app -- see the version-line tests below.
+    """
+    f = [int(fg.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)]
+    b = [int(bg.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)]
+    return "#" + "".join(f"{round(alpha * x + (1 - alpha) * y):02X}" for x, y in zip(f, b))
+
+
 def _theme_tokens() -> dict:
     """The app's real theme tokens, read from .streamlit/config.toml."""
     config_path = os.path.join(os.path.dirname(__file__), "..", ".streamlit", "config.toml")
@@ -418,3 +430,59 @@ def test_start_page_disclaimer_banner_not_conveyed_by_color_alone():
     assert len(banners) == 1, "expected exactly one role=alert disclaimer banner"
     value = banners[0].value.lower()
     assert "not medical software" in value and "must not" in value
+
+
+# ---------------------------------------------------------------------------
+# TRSET-35 -- the version line in the shared header
+# ---------------------------------------------------------------------------
+
+# Measured in a running app on 2026-09-02 (Chrome DevTools computed style):
+# st.caption renders <p> inside a div[data-testid="stCaptionContainer"] carrying
+# `opacity: 0.6`; the <p>'s own color is the theme's textColor, faded by that
+# opacity rather than by a pre-composited color token.
+_STREAMLIT_CAPTION_OPACITY = 0.6
+
+
+def test_version_line_text_meets_normal_text_contrast():
+    # TRSET-35 AC 6: the pair the version line actually renders at must clear the
+    # 4.5:1 normal-text minimum. st.markdown puts it on the theme's own
+    # textColor/backgroundColor pair at full opacity -- no new token introduced.
+    theme = _theme_tokens()
+    ratio = contrast_ratio(theme["textColor"], theme["backgroundColor"])
+    assert ratio >= NORMAL_TEXT_MIN, (
+        f"version line {theme['textColor']} on {theme['backgroundColor']} is "
+        f"{ratio:.2f}:1, below the {NORMAL_TEXT_MIN}:1 normal-text minimum"
+    )
+
+
+def test_st_caption_would_fail_the_contrast_gate_which_is_why_it_is_not_used():
+    """The measurement behind TRSET-35's documented fallback from st.caption.
+
+    st.caption's 0.6 opacity composites the theme's #281946 to #7E7590 on white --
+    4.34:1, under the 4.5:1 minimum for normal text (14px, weight 400, so the 3:1
+    large-text allowance does not apply). This pins the finding: if Streamlit ever
+    lightens the fade enough to clear the gate, this fails and the choice can be
+    revisited. It is not asserting that Streamlit is broken -- only that this app
+    cannot render its version line through that style.
+    """
+    theme = _theme_tokens()
+    faded = composite_over(
+        theme["textColor"], theme["backgroundColor"], _STREAMLIT_CAPTION_OPACITY
+    )
+    ratio = contrast_ratio(faded, theme["backgroundColor"])
+    assert ratio < NORMAL_TEXT_MIN, (
+        f"st.caption's faded text is now {faded} at {ratio:.2f}:1, which CLEARS the "
+        f"{NORMAL_TEXT_MIN}:1 minimum -- revisit TRSET-35's st.markdown fallback"
+    )
+    assert 4.0 <= ratio < NORMAL_TEXT_MIN, (
+        f"measured {ratio:.2f}:1, outside the recorded ~4.34:1 band; re-measure "
+        "before trusting the README's number"
+    )
+
+
+def test_version_line_introduces_no_new_color_token():
+    # TRSET-4 invariant: _BRAND_CSS still carries exactly one color override, so
+    # the version line added no styling of its own.
+    assert _css_override_text_color()  # asserts "exactly one" internally
+    theme = _theme_tokens()
+    assert theme["textColor"].upper() != theme["backgroundColor"].upper()

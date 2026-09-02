@@ -47,6 +47,9 @@ import meal_config
 # its own text and knows nothing about the session gate below that gives it
 # priority over the tool on a fresh session.
 import start_page
+# The app's version number (TRSET-35). Its own module so the stdlib-only bundle
+# builder can read the same constant without importing this one.
+from version import APP_VERSION
 
 # Root of the config library the selector browses. Defaults to the simulator's
 # in-tree scenario_configs (correct for an editable/sibling install). Under the
@@ -1231,6 +1234,16 @@ def main():
     _render_disclaimer_banner()
     if os.path.exists(LOGO_PATH):
         _render_logo()
+    # One insertion point for every page: above the start-page gate, so the start
+    # page and the tool both carry it, and so the anticipated st.navigation
+    # migration keeps it without any page module knowing about the version.
+    #
+    # st.markdown, not st.caption, on a measured accessibility finding: Streamlit
+    # fades captions with opacity 0.6 on the stCaptionContainer, which composites
+    # the theme's #281946 to #7E7590 on white -- 4.34:1, under the 4.5:1 WCAG 1.4.3
+    # minimum for normal text (14px, weight 400). Measured in a running app, not
+    # assumed; test_accessibility.py holds the finding.
+    st.markdown(f"Version {APP_VERSION}")
     _init_session_state()
 
     # TRSET-34 start-page gate. Everything above runs for both pages, so the
