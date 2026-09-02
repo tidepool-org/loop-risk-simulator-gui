@@ -1226,7 +1226,7 @@ def _render_logo():
 
 
 def main():
-    st.set_page_config(page_title="Tidepool Loop Risk Severity Estimation Tool", layout="wide")
+    st.set_page_config(page_title="Tidepool Loop Risk Severity Evaluation Tool", layout="wide")
     st.markdown(_BRAND_CSS, unsafe_allow_html=True)
     _render_disclaimer_banner()
     if os.path.exists(LOGO_PATH):
@@ -1246,7 +1246,7 @@ def main():
             st.rerun()
         return
 
-    st.title("Tidepool Loop Risk Severity Estimation Tool")
+    st.title("Tidepool Loop Risk Severity Evaluation Tool")
     st.markdown(
         "Estimates the clinical risk severity of Tidepool Loop across a library of "
         "virtual-patient scenarios, summarizing the glycemic and DKA risk metrics for each."

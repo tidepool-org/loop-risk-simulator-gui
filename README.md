@@ -531,10 +531,42 @@ suite bypasses the gate through one `make_app_test` factory in
 again, and nothing is persisted. No control returns to the start page once
 acknowledged. The page is not in the export bundle, so a reviewer holding an
 exported zip still sees no AI disclosure (separate ticket). The page title
-restates the app title ("Tidepool **Loop** Risk Severity Estimation Tool") while
-the purpose statement, reproduced verbatim, says "Tidepool Risk Severity
-Estimation Tool (TRSET)" — the naming inconsistency is deliberately not
-reconciled here (a third variant, "Evaluation", is in `DISCLAIMER_TEXT`).
+restates the app title rather than importing it, so the two are kept in step by
+a test rather than by construction; the naming inconsistency this originally
+shipped with is resolved in TRSET-44 below.
 `st.navigation`/`st.Page` was deliberately not adopted: `AppTest` renders only
 the default page of a multipage app. `render()` takes no arguments and does not
 act on its own button, so that migration can adopt it unchanged.
+
+## One name for the tool (TRSET-44)
+
+**What changed (≤100 words):** The tool is called the **Risk Severity Evaluation
+Tool** everywhere. Three names for it used to render within a screenful:
+`st.title` and `set_page_config` said "Estimation", `start_page.PAGE_TITLE` and
+the purpose statement said "Estimation", `DISCLAIMER_TEXT` said "Evaluation".
+"Evaluation" is correct — it is what TRSET expands to (Tidepool Risk Severity
+Evaluation Tool), confirmed against the QMS documentation on 2026-09-01. A
+one-word substitution at four sites; no behavioural change, and no other
+wording touched. "Loop" stays a title-only qualifier (see Cautions).
+
+**Validation (≤100 words):** `tests/test_trset44_integration.py` holds the
+invariant. It *extracts* the name from each site with one regex and compares the
+captures rather than reading the strings — TRSET-34 showed the eyeball check is
+the one that misses — so a future edit to any single site fails here instead of
+shipping a fresh split. Each of the four sites was mutation-checked
+individually, and each failure was observed. Two independent gates: the
+agreement test catches any divergence, a second test blocklists "Estimation" on
+everything rendered. The `set_page_config` title is asserted at source level,
+since `AppTest` does not expose it. Suite: 313 passed, 7 skipped (+3, this
+file).
+
+**Cautions / limitations:** The invariant is on the canonical core, **"Risk
+Severity Evaluation Tool"**, with "Loop" optional — not on the full string.
+`st.title` and `PAGE_TITLE` name this GUI ("Tidepool **Loop** Risk Severity
+Evaluation Tool"); `DISCLAIMER_TEXT` and the purpose statement name the
+underlying tool without "Loop", and the purpose statement's "(TRSET)" makes its
+occurrence the acronym's expansion, which has no "Loop" in it. So the
+`DISCLAIMER_TEXT` body is unchanged by design. Nothing outside the app
+UI renames: no export filename, no RTF content, no export-bundle path
+contained the name, so there is no downstream break. The launcher's
+"Tidepool Loop Risk Simulator GUI" is a different name and was left alone.

@@ -19,7 +19,7 @@ import streamlit as st
 # Restates the app title rather than importing it: this module must not import
 # streamlit_app (that would be circular, and a page adopted by st.Page has to
 # stand on its own). The integration test asserts the two stay in step.
-PAGE_TITLE = "Tidepool Loop Risk Severity Estimation Tool"
+PAGE_TITLE = "Tidepool Loop Risk Severity Evaluation Tool"
 
 PURPOSE_HEADING = "Purpose"
 AI_DISCLOSURE_HEADING = "AI Code Disclosure"
@@ -29,13 +29,17 @@ ACKNOWLEDGE_LABEL = "Got it"
 # see the module docstring for why the page itself does not act on the click.
 ACKNOWLEDGE_BUTTON_KEY = "start_page_acknowledge_clicked"
 
-# The three text blocks below are reproduced verbatim from TRSET-34. They are
-# constants (the DISCLAIMER_TEXT precedent) so the tests assert the rendered
-# text against the source of truth rather than a copy-pasted literal. Do not
-# copy-edit, reflow, or normalize the tool's name in them.
+# The three text blocks below are reproduced verbatim from TRSET-34, with the
+# single exception TRSET-44 authorized: "Estimation" -> "Evaluation" in the
+# tool's name, which is what TRSET expands to. They are constants (the
+# DISCLAIMER_TEXT precedent) so the tests assert the rendered text against the
+# source of truth rather than a copy-pasted literal. Do not copy-edit or
+# reflow them, and do not add "Loop" to the name here -- the parenthetical
+# makes this the acronym's expansion, and TRSET has no "Loop" in it. The
+# title-only "Loop" qualifier lives in PAGE_TITLE.
 PURPOSE_TEXT = (
     "This app is designed for risk exploration rather than formal risk "
-    "assessment. It uses the Tidepool Risk Severity Estimation Tool (TRSET) "
+    "assessment. It uses the Tidepool Risk Severity Evaluation Tool (TRSET) "
     "without modification behind the scenes, so the outputs are from the "
     "native TRSET tool. However, the native TRSET tool supports more flexible "
     "configurations for scenarios. As with the native TRSET tool, this app is "
