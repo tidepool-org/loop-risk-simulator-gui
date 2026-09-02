@@ -673,3 +673,67 @@ pinned by `test_accessibility.py`. The number is bumped manually and nothing
 enforces it, so a stale number is possible between releases. Phases 3–4 mock the
 git boundary (`resolve_ref`/`extract_tree_paths`) as `test_build_bundle.py` does;
 the app repo they build from is real.
+
+## Narrative risk description (TRSET-36)
+
+**What changed (≤100 words):** The *Configure meals & boluses* editor's first
+control is a 250-character **Risk description** text area. Its text is written to
+`metadata.risk_description` in all four generated configs, replacing the hardcoded
+`RISK_DESCRIPTION` placeholder, and echoed in the generated-configs summary — read
+back from the written JSON, not from the widget. `meal_config.RISK_DESCRIPTION_MAX_CHARS`
+is the only limit; the widget reads it and `_validate_risk_description` mirrors it for
+non-Streamlit callers. Text is stripped before the empty check, the limit check and
+the write. Changing it invalidates a generated set, exactly as changing the duration
+does. No parser, schema, `gui_runner` or `severity_model` change.
+
+Example:
+
+```bash
+streamlit run streamlit_app.py     # Configure meals & boluses -> Risk description -> Generate configs
+```
+
+```python
+import meal_config
+
+spec = meal_config.MealConfigSpec.aligned(
+    mode, entries, risk_description="  Large evening meal\nno correction for 4 h  "
+)
+meal_config.resolve_risk_description(None)        # -> "GUI-configured meal and bolus entries"
+meal_config.resolve_risk_description("  x \n ")   # -> "x"   (stripped, then written)
+```
+
+An unfilled field falls back to the existing constant, so a spec that names no
+description produces byte-identical output to the version before this feature.
+
+**Validation (≤100 words):** `tests/test_trset36_integration.py` — 15 tests, no
+mocks, real configs under the `LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT` seam. Padded text
+with an embedded newline reaches all four files stripped, newline serialized as `\n`,
+the other three metadata keys untouched; empty and whitespace-only both write *and
+echo* the constant — which is also the proof the echo reads the file, not the widget;
+editing it drops the set, regenerating writes the new text, changing the meal count
+drops nothing; `generate_config()` refuses 251 stripped characters, accepts 250.
+`test_trset13`'s real 2-hour run carries one into the export zip; `test_accessibility`
+covers the new surface. Suite: 359 passed, 7 skipped,
+1 deselected (`-m slow`: 1 passed).
+
+**Cautions / limitations:** Counting is **code points**, as both `max_chars` and
+`len()` count — an emoji or a combining accent may cost more than one, so 250 is not a
+grapheme guarantee. The `MealConfigError` for an over-long description is unreachable
+from the UI (`max_chars` blocks first) and exists to defend `generate_config()` for
+another caller; that is by design, not a gap. The description is **not** surfaced in
+the results pane or the severity RTF — those stay byte-identical, and surfacing it in
+both together is a separate item. The library path is untouched: the descriptions its
+configs already carry are still never displayed. The echo goes through `st.caption`,
+so markdown in the text renders as markdown (HTML is escaped, not executed); the file
+keeps the text verbatim. And library configs spell the neighbouring key `risk-id`
+where `generate_config()` writes `risk_id` — accepted by `ScenarioMetadata` by design,
+untouched here, and still needing a decision.
+
+Two Streamlit behaviours this feature rests on, measured in a running app on
+2026-09-02 rather than assumed. (1) `max_chars` is enforced in Streamlit's own JS, not
+as an HTML `maxlength`, and an over-limit edit is **rejected whole rather than
+truncated**: at 250 characters further keystrokes and an over-long paste do nothing,
+with no message — which is what makes the mirrored `MealConfigError` unreachable from
+the UI, and also means a user pasting 300 characters sees the field stay empty.
+(2) `st.text_area` commits on blur (or Ctrl+Enter), not per keystroke, so a generated
+set is dropped when the field loses focus rather than vanishing mid-sentence.

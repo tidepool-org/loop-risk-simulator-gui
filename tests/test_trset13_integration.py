@@ -37,6 +37,7 @@ library.
 import datetime
 import json
 import os
+import zipfile
 
 import pandas as pd
 import pytest
@@ -51,6 +52,7 @@ from tidepool_data_science_simulator.projects.risk.gui_runner import (  # noqa: 
     validate_config_dir,
 )
 
+import export_bundle  # noqa: E402
 import meal_config  # noqa: E402
 import streamlit_app  # noqa: E402
 
@@ -63,6 +65,11 @@ NO_LOOP_UNITS = 3.3
 # An entry only a midnight-crossing window can hold: past the 20:00 end of the
 # 8-hour default, and inside the 24-hour one.
 LATE_MEAL_TIME = datetime.time(23, 30)
+
+# TRSET-36: this run doubles as the narrative description's end-to-end proof. It is
+# entered here, on the one real run the default suite already pays for, rather than in
+# a second run of its own -- see the export test at the bottom of this file.
+NARRATIVE_DESCRIPTION = "Bolus accepted from Loop, then no correction for two hours"
 
 RUN_TIMEOUT_SECONDS = 900
 SLOW_RUN_TIMEOUT_SECONDS = 2700
@@ -213,6 +220,9 @@ def _captions(at):
 def short_run(temp_library):
     """One real 2-hour run, configured and started through the app itself."""
     at = _short_term_app(SHORT_RUN_HOURS)
+    at.text_area(key=streamlit_app.RISK_DESCRIPTION_KEY).set_value(
+        NARRATIVE_DESCRIPTION
+    ).run()
     _configure_and_generate(at, MEAL_TIME)
     return _run_to_completion(at, RUN_TIMEOUT_SECONDS)
 
@@ -285,6 +295,41 @@ def test_the_severity_model_and_its_own_outputs_were_left_alone(short_run):
     for stage_result in assessment.stages.values():
         assert stage_result.severity != streamlit_app.SUB_MINIMUM_DURATION_CELL
         assert stage_result.lbgi_value_avg != streamlit_app.SUB_MINIMUM_DURATION_CELL
+
+
+# ---------------------------------------------------------------------------
+# TRSET-36: the description, end to end, on the run this suite already pays for
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def short_run_export(short_run):
+    """The completed run's export zip, built through the app's own export control."""
+    export_buttons = [button for button in short_run.button if button.label == "Export results"]
+    assert len(export_buttons) == 1, "a completed run must offer the export control"
+    export_buttons[0].click().run()
+    assert not short_run.exception
+    assert short_run.session_state["export_error"] is None, short_run.session_state["export_error"]
+    return short_run.session_state["export_zip_path"]
+
+
+def test_the_exported_configs_carry_the_narrative_risk_description(short_run, short_run_export):
+    """TRSET-36 Phase 5: the description reaches the zip that is the record of what ran.
+
+    The whole path, with nothing stubbed: the editor's field -> the four generated
+    files -> the snapshot ``_start_run`` takes of them -> ``build_export_zip``. Asserted
+    on the bytes inside the archive, which is what a reviewer of a run actually opens.
+    """
+    export_root = export_bundle.export_root_name(
+        short_run.session_state["run_result"].save_dir
+    )
+    prefix = f"{export_root}/{export_bundle.GENERATED_CONFIGS_DIR_NAME}/"
+    with zipfile.ZipFile(short_run_export) as archive:
+        names = [name for name in archive.namelist() if name.startswith(prefix)]
+        assert len(names) == len(meal_config.PROFILES), names
+        for name in names:
+            config = json.loads(archive.read(name))
+            assert config["metadata"]["risk_description"] == NARRATIVE_DESCRIPTION, name
 
 
 # ---------------------------------------------------------------------------

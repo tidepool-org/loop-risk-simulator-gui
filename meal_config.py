@@ -119,6 +119,13 @@ RISK_ID_TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 CONFIG_FORMAT_VERSION = "v1.0"
 RISK_DESCRIPTION = "GUI-configured meal and bolus entries"
 
+# The author's own description is bounded here and nowhere else: the editor's
+# text_area reads this for its max_chars, so the widget and the generator cannot
+# disagree about the limit. Counted in code points, which is what both max_chars and
+# len() count -- an emoji or a combining accent may cost more than one, so 250 is not
+# a grapheme guarantee.
+RISK_DESCRIPTION_MAX_CHARS = 250
+
 # The glucose history the baseline template uses for every stage, patient and
 # sensor alike. Not user-configurable this stage (settings/targets/schedules are
 # explicitly out of scope), so it is a constant rather than a spec field.
@@ -214,15 +221,25 @@ class MealConfigSpec:
     every profile get the identical number. None means the base config's own
     duration, so the library stays the single source for the default rather than a
     constant here restating it.
+
+    ``risk_description`` is the author's own narrative of the hazardous situation being
+    explored, written into every generated file's ``metadata``. None, empty or
+    whitespace-only falls back to ``RISK_DESCRIPTION``, so a spec that says nothing
+    produces exactly the output this module produced before the field existed.
     """
     mode: str
     patient_model: EntrySet
     pump: EntrySet
     duration_hours: Optional[float] = None
+    risk_description: Optional[str] = None
 
     @classmethod
     def aligned(
-        cls, mode: str, entries: EntrySet, duration_hours: Optional[float] = None
+        cls,
+        mode: str,
+        entries: EntrySet,
+        duration_hours: Optional[float] = None,
+        risk_description: Optional[str] = None,
     ) -> "MealConfigSpec":
         """Spec whose pump timeline is the same entry set as the patient model's."""
         return cls(
@@ -230,6 +247,7 @@ class MealConfigSpec:
             patient_model=entries,
             pump=entries,
             duration_hours=duration_hours,
+            risk_description=risk_description,
         )
 
 
@@ -467,9 +485,44 @@ def _validate_mode(mode: str) -> str:
     return mode
 
 
+def _validate_risk_description(text: Optional[str]) -> str:
+    """The stripped description, or MealConfigError naming the limit it broke.
+
+    Stripped before the limit is applied, so trailing whitespace can never cost a user
+    a character. Unreachable from the editor -- the widget's ``max_chars`` blocks the
+    text before it can arrive here -- and that is the point: this is the same mirrored
+    bound every other ``_validate_*`` above is, so ``generate_config`` stays correct
+    for a caller that is not the form.
+    """
+    stripped = (text or "").strip()
+    if len(stripped) > RISK_DESCRIPTION_MAX_CHARS:
+        raise MealConfigError(
+            f"A risk description must be at most {RISK_DESCRIPTION_MAX_CHARS} "
+            f"characters, got {len(stripped)}."
+        )
+    return stripped
+
+
 # ---------------------------------------------------------------------------
 # Entry resolution
 # ---------------------------------------------------------------------------
+
+
+def resolve_risk_description(text: Optional[str]) -> str:
+    """What a description field actually writes: the stripped text, or the fallback.
+
+    Public, and the single answer to that question, because two callers need it -- the
+    generator, which writes it, and the editor, which compares a generated set against
+    what the field would produce now. Were the editor to compare the raw field instead,
+    an unfilled field would never equal the ``RISK_DESCRIPTION`` its own configs carry,
+    and every set generated without a description would invalidate itself on the render
+    immediately after it was generated.
+
+    The fallback is the constant this key held before the field existed, so it still
+    says something true -- the config *was* GUI-configured -- and a spec that names no
+    description produces byte-identical output to the version before TRSET-36.
+    """
+    return _validate_risk_description(text) or RISK_DESCRIPTION
 
 
 def resolve_carb_grams(mode: str, profile: Profile, value_input: Optional[float]) -> float:
@@ -629,6 +682,7 @@ def _stage_override(
 def generate_config(spec: MealConfigSpec, generated_risk_id: str, profile: Profile) -> dict:
     """The complete scenario config for one profile. Pure apart from library reads."""
     _validate_mode(spec.mode)
+    risk_description = resolve_risk_description(spec.risk_description)
     if not spec.patient_model.meals and not spec.patient_model.boluses:
         raise MealConfigError("Add at least one meal or bolus entry before generating configs.")
     start, end, duration_hours = simulation_window(spec.duration_hours, profile)
@@ -636,7 +690,7 @@ def generate_config(spec: MealConfigSpec, generated_risk_id: str, profile: Profi
         "metadata": {
             "risk_id": generated_risk_id,
             "simulation_id": f"{generated_risk_id}-{profile.token}",
-            "risk_description": RISK_DESCRIPTION,
+            "risk_description": risk_description,
             "config_format_version": CONFIG_FORMAT_VERSION,
         },
         "base_config": base_config_pointer(profile),
