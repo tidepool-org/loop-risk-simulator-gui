@@ -286,6 +286,20 @@ PUMP_SENTINEL_NOTE = (
 
 MAX_ENTRIES = 10
 
+# The narrative risk description (TRSET-36). Asked first in the editor, because it is
+# the premise the mechanics below answer to. The limit lives in meal_config, so the
+# widget and the generator cannot disagree about it.
+RISK_DESCRIPTION_KEY = "risk_description"
+RISK_DESCRIPTION_LABEL = "Risk description"
+RISK_DESCRIPTION_HELP = (
+    "Enter a description of the hazardous situation you are exploring. Include any "
+    "information that would be critical in order to re-create the situation you have "
+    "in mind."
+)
+# Streamlit's own floor for a text_area; two lines, which is as much room as a short
+# paragraph needs and small enough to keep the duration picker on screen.
+RISK_DESCRIPTION_HEIGHT_PX = 68
+
 # Simulation duration (TRSET-13). Labelled by the investigative question being
 # asked, not by a raw hour count -- the hours are a consequence of the question, so
 # they are appended rather than leading. The values come from meal_config, so the
@@ -560,6 +574,7 @@ def _reset_generated_state() -> None:
     st.session_state.generated_risk_id = None
     st.session_state.generated_configs = None
     st.session_state.generated_duration_hours = None
+    st.session_state.generated_risk_description = None
     st.session_state.generated_error = None
 
 
@@ -617,6 +632,18 @@ def _configs_duration_hours(configs: dict) -> float:
     return float(configs[first]["override_config"][0]["duration_hours"])
 
 
+def _configs_risk_description(configs: dict) -> str:
+    """The description a generated config set carries, read back from its JSON.
+
+    Mirrors ``_configs_duration_hours`` deliberately, and for the same reason: what is
+    reported, and what a field change is compared against, are both what was actually
+    written -- so the echo verifies the file rather than repeating the widget. All four
+    files carry the same value by construction.
+    """
+    first = next(iter(sorted(configs)))
+    return configs[first]["metadata"]["risk_description"]
+
+
 def _generated_temp_dir() -> str:
     """Session-scoped temp root the generated config library is written under.
 
@@ -644,6 +671,7 @@ def _generate_configs(spec) -> None:
         st.session_state.generated_risk_id = generated_risk_id
         st.session_state.generated_configs = configs
         st.session_state.generated_duration_hours = _configs_duration_hours(configs)
+        st.session_state.generated_risk_description = _configs_risk_description(configs)
         st.session_state.generated_error = None
         # No reset here: the new risk id changes the selection, and _sync_selection
         # clears the previous run for every way the selection can change.
@@ -668,6 +696,8 @@ def _render_generated_summary() -> None:
     configs = st.session_state.generated_configs
     generated_risk_id = st.session_state.generated_risk_id
     st.success(f"Generated {len(configs)} config file(s) with risk id `{generated_risk_id}`.")
+
+    st.caption(f"Risk description: {_configs_risk_description(configs)}")
 
     duration_hours = _configs_duration_hours(configs)
     st.caption(f"Simulation duration: {duration_hours:g} hours per stage.")
@@ -704,6 +734,14 @@ def _render_meal_config_editor():
     """
     st.markdown("### Meal and bolus configuration")
 
+    risk_description = st.text_area(
+        RISK_DESCRIPTION_LABEL,
+        help=RISK_DESCRIPTION_HELP,
+        max_chars=meal_config.RISK_DESCRIPTION_MAX_CHARS,
+        height=RISK_DESCRIPTION_HEIGHT_PX,
+        key=RISK_DESCRIPTION_KEY,
+    )
+
     duration_hours = _render_duration_control()
     if duration_hours is None:
         st.info("Choose a usable simulation duration to configure entries.")
@@ -714,6 +752,17 @@ def _render_meal_config_editor():
     # duration_hours, belong to a question that is no longer being asked. Dropping it
     # also changes the selection, so _sync_selection clears any run behind it.
     if st.session_state.generated_duration_hours not in (None, duration_hours):
+        _reset_generated_state()
+
+    # And a set whose description no longer matches the field, for the same reason: the
+    # export ships the generated configs as the record of what was run, so what can be
+    # run has to be what the editor now describes. Compared against the RESOLVED
+    # description -- what this field would write -- so an unfilled field, which writes
+    # the fallback constant its own configs carry, does not read as a change.
+    if st.session_state.generated_risk_description not in (
+        None,
+        meal_config.resolve_risk_description(risk_description),
+    ):
         _reset_generated_state()
 
     window_start, _ = meal_config.authoring_window(duration_hours)
@@ -751,14 +800,21 @@ def _render_meal_config_editor():
     )
     if aligned:
         spec = meal_config.MealConfigSpec.aligned(
-            mode, patient_entries, duration_hours=duration_hours
+            mode,
+            patient_entries,
+            duration_hours=duration_hours,
+            risk_description=risk_description,
         )
     else:
         pump_entries = _entry_set_editor(
             "pump", "Pump", mode, window_start, allow_sentinel=False
         )
         spec = meal_config.MealConfigSpec(
-            mode, patient_entries, pump_entries, duration_hours=duration_hours
+            mode,
+            patient_entries,
+            pump_entries,
+            duration_hours=duration_hours,
+            risk_description=risk_description,
         )
 
     if st.button("Generate configs"):
@@ -952,6 +1008,9 @@ def _init_session_state():
         # The duration the current set was generated with (TRSET-13), so changing
         # the picker can invalidate a set built for a different question.
         "generated_duration_hours": None,
+        # The description the current set was generated with (TRSET-36), for the same
+        # reason: changing it makes the set the record of a question no longer asked.
+        "generated_risk_description": None,
         "generated_error": None,
         # The selection the page last rendered for, so a change can be detected and
         # the previous selection's results cleared. _UNSET (not a real selection) so

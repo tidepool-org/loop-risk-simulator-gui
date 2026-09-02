@@ -356,6 +356,25 @@ def test_the_duration_pickers_widgets_carry_accessible_labels():
     _assert_no_positive_tabindex(at)
 
 
+def test_the_risk_description_field_carries_an_accessible_label():
+    # TRSET-36: the description field is the one widget that feature adds, and it sits
+    # on the configure path, which the generic gate above never renders (it drives the
+    # default library source). This reaches the editor and re-runs the same assertions
+    # over it -- the new surface is confirmed labeled, not assumed to be.
+    at = make_app_test(default_timeout=60)
+    at.run()
+    at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
+    assert not at.exception
+
+    field = at.text_area(key=streamlit_app.RISK_DESCRIPTION_KEY)
+    # A real label, not a placeholder standing in for one: WCAG 1.3 needs the name to
+    # survive the field being filled.
+    assert field.label == streamlit_app.RISK_DESCRIPTION_LABEL
+    assert field.label.strip()
+    _assert_all_widgets_labeled(at)
+    _assert_no_positive_tabindex(at)
+
+
 # ---------------------------------------------------------------------------
 # Feature gate -- end-to-end integration accessibility check
 # ---------------------------------------------------------------------------
