@@ -497,3 +497,76 @@ under 40 mg/dL (4 hours at 5-minute steps), so it is unreachable below a ~4-hour
 while `zero_or_negative` is reachable at any length — the table's two conditions are
 not equally available on short runs. Marking is keyed on the duration snapshot taken
 at run start (`_run_duration_hours`), so a library run is never marked.
+
+## Start page (TRSET-34)
+
+**What changed (≤100 words):** A start page now stands in front of the tool on a
+fresh session. It carries a purpose statement (risk exploration, not formal risk
+assessment; not medical software) and an AI code disclosure (the UI wrapper was
+written with AI assistance; TRSET itself is unmodified, and every change went
+through a human-defined, human-reviewed process). `Got it` advances to the app.
+It lives in its own `start_page.py` as verbatim text constants plus a
+zero-argument `render()`; the session gate is a few lines in `main()`. Page
+config, `_BRAND_CSS`, the disclaimer banner and the logo run above the gate, so
+both pages carry them.
+
+Example:
+
+```bash
+streamlit run streamlit_app.py     # start page first; Got it opens the tool
+```
+
+**Validation (≤100 words):** `tests/test_trset34_integration.py` — the Feature
+gate — drives the real app through `AppTest` in three phases: the unacknowledged
+first render (start page present, text asserted against the module constants,
+chrome present, no config radio/selectbox/results), a real `Got it` click
+(tool present, start page gone, still exactly one `role="alert"` banner), and
+the gate staying down across an unrelated widget change and repeated reruns —
+the `_init_session_state()` clobbering failure mode. `test_accessibility.py`
+gains start-page label/tabindex/alt-text/banner gates. Every other `AppTest`
+suite bypasses the gate through one `make_app_test` factory in
+`tests/conftest.py`. Full suite: 310 passed, 7 skipped.
+
+**Cautions / limitations:** Per-session only, by design — a refresh shows the page
+again, and nothing is persisted. No control returns to the start page once
+acknowledged. The page is not in the export bundle, so a reviewer holding an
+exported zip still sees no AI disclosure (separate ticket). The page title
+restates the app title rather than importing it, so the two are kept in step by
+a test rather than by construction; the naming inconsistency this originally
+shipped with is resolved in TRSET-44 below.
+`st.navigation`/`st.Page` was deliberately not adopted: `AppTest` renders only
+the default page of a multipage app. `render()` takes no arguments and does not
+act on its own button, so that migration can adopt it unchanged.
+
+## One name for the tool (TRSET-44)
+
+**What changed (≤100 words):** The tool is called the **Risk Severity Evaluation
+Tool** everywhere. Three names for it used to render within a screenful:
+`st.title` and `set_page_config` said "Estimation", `start_page.PAGE_TITLE` and
+the purpose statement said "Estimation", `DISCLAIMER_TEXT` said "Evaluation".
+"Evaluation" is correct — it is what TRSET expands to (Tidepool Risk Severity
+Evaluation Tool), confirmed against the QMS documentation on 2026-09-01. A
+one-word substitution at four sites; no behavioural change, and no other
+wording touched. "Loop" stays a title-only qualifier (see Cautions).
+
+**Validation (≤100 words):** `tests/test_trset44_integration.py` holds the
+invariant. It *extracts* the name from each site with one regex and compares the
+captures rather than reading the strings — TRSET-34 showed the eyeball check is
+the one that misses — so a future edit to any single site fails here instead of
+shipping a fresh split. Each of the four sites was mutation-checked
+individually, and each failure was observed. Two independent gates: the
+agreement test catches any divergence, a second test blocklists "Estimation" on
+everything rendered. The `set_page_config` title is asserted at source level,
+since `AppTest` does not expose it. Suite: 313 passed, 7 skipped (+3, this
+file).
+
+**Cautions / limitations:** The invariant is on the canonical core, **"Risk
+Severity Evaluation Tool"**, with "Loop" optional — not on the full string.
+`st.title` and `PAGE_TITLE` name this GUI ("Tidepool **Loop** Risk Severity
+Evaluation Tool"); `DISCLAIMER_TEXT` and the purpose statement name the
+underlying tool without "Loop", and the purpose statement's "(TRSET)" makes its
+occurrence the acronym's expansion, which has no "Loop" in it. So the
+`DISCLAIMER_TEXT` body is unchanged by design. Nothing outside the app
+UI renames: no export filename, no RTF content, no export-bundle path
+contained the name, so there is no downstream break. The launcher's
+"Tidepool Loop Risk Simulator GUI" is a different name and was left alone.

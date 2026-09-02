@@ -19,7 +19,10 @@ import zipfile
 import pytest
 
 pytest.importorskip("streamlit")
-from streamlit.testing.v1 import AppTest  # noqa: E402
+# The shared AppTest factory (tests/conftest.py). It builds the harness with the
+# TRSET-34 start-page gate already acknowledged, so these suites drive the tool
+# directly, as they did before the start page existed.
+from conftest import make_app_test  # noqa: E402
 
 sys.path.insert(0, "post_processing")
 # Project root (holds streamlit_app.py) so its pure helpers can be imported
@@ -52,7 +55,7 @@ def _make_fake_assessment():
 
 
 def test_app_loads_and_lists_real_collections():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
     collection_selectbox = at.selectbox[0]
@@ -65,7 +68,7 @@ def test_logo_renders_with_numeric_width_and_alt_text():
     # explicitly-sized HTML <img>. Guard the width (1.5x baseline = 240px) and
     # the exact alt-text against regressions. AppTest sees the element tree, not
     # pixels, so we assert on the rendered <img> markup.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
     logo_imgs = [m for m in at.markdown if "<img" in m.value and 'alt="Tidepool logo"' in m.value]
@@ -78,7 +81,7 @@ def test_brand_css_restores_material_icon_font():
     # icon font, so expander toggle glyphs rendered as the literal ligature text
     # "keyboard_arrow_down" and overlapped the header label. Guard the override
     # that restores the icon font.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
     css_blocks = [
@@ -90,11 +93,11 @@ def test_brand_css_restores_material_icon_font():
 def test_header_description_and_run_button_copy():
     # TRSET-2 presentation copy: retitled header, a short description near it,
     # and the run button relabeled to "Run Tool".
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
 
-    assert at.title[0].value == "Tidepool Loop Risk Severity Estimation Tool"
+    assert at.title[0].value == "Tidepool Loop Risk Severity Evaluation Tool"
 
     markdown_text = " ".join(m.value for m in at.markdown)
     assert "virtual-patient scenarios" in markdown_text
@@ -103,7 +106,7 @@ def test_header_description_and_run_button_copy():
 
 
 def test_single_directory_scope_populates_tlr_selectbox():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     at.selectbox[0].select("loop_risk_v2_2_0_full").run()
     at.radio(key="run_scope").set_value("One specific directory").run()
@@ -121,7 +124,7 @@ def test_happy_path_result_renders_table():
         risk_dir_results=[RiskDirRunResult("TLR-TEST", _make_fake_assessment(), [])],
         cancelled=False,
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = fake_result
     at.run()
 
@@ -148,7 +151,7 @@ def test_which_phase_dropdown_is_removed():
         risk_dir_results=[RiskDirRunResult("TLR-TEST", _make_fake_assessment(), [])],
         cancelled=False,
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = fake_result
     at.run()
 
@@ -163,7 +166,7 @@ def test_no_usable_data_renders_warning_not_crash():
         risk_dir_results=[RiskDirRunResult("TLR-EMPTY", None, [])],
         cancelled=False,
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = fake_result
     at.run()
 
@@ -177,12 +180,12 @@ def test_integration_full_app_run_renders_header_and_logo():
     # config library, asserting the header surface (title + collections) and the
     # reworked logo both render correctly in a single full app run -- not with a
     # mocked result, but the real import-time library listing exercised.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
 
     # Header: title present and the real library populated the collection selector.
-    assert any(t.value == "Tidepool Loop Risk Severity Estimation Tool" for t in at.title)
+    assert any(t.value == "Tidepool Loop Risk Severity Evaluation Tool" for t in at.title)
     collection_selectbox = [sb for sb in at.selectbox if sb.label == "Config collection"][0]
     assert len(collection_selectbox.options) > 0
 
@@ -208,7 +211,7 @@ def test_disclaimer_banner_renders_above_logo_with_exact_text():
     # library (mirroring test_integration_full_app_run_renders_header_and_logo),
     # asserting the disclaimer banner renders once, with the exact verbatim text,
     # at the top of the page -- above the logo <img>.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
     assert not at.exception
 
@@ -242,7 +245,7 @@ def test_disclaimer_banner_does_not_collide_with_st_warning():
         risk_dir_results=[RiskDirRunResult("TLR-EMPTY", None, [])],
         cancelled=False,
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = fake_result
     at.run()
 
@@ -257,7 +260,7 @@ def test_cancelled_run_renders_cancellation_warning():
         risk_dir_results=[RiskDirRunResult("TLR-TEST", _make_fake_assessment(), [])],
         cancelled=True,
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = fake_result
     at.run()
 
@@ -401,7 +404,7 @@ def test_loop_home_charts_render_three_coequal_stage_columns():
             "pre-noLoop_t1_median": _NO_LOOP_TSV,
         },
     })
-    at = AppTest.from_file("streamlit_app.py", default_timeout=120)
+    at = make_app_test(default_timeout=120)
     at.session_state["run_result"] = fake_result
     at.run()
 
@@ -428,7 +431,7 @@ def test_generic_simulator_pngs_are_no_longer_rendered():
         ],
         cancelled=False,
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = fake_result
     at.run()
 
@@ -442,7 +445,7 @@ def test_unreadable_trace_is_surfaced_not_swallowed():
             "pre-Loop_NoMitigations_t1_median": "/does/not/exist.tsv",
         },
     })
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = fake_result
     at.run()
 
@@ -454,7 +457,7 @@ def test_unreadable_trace_is_surfaced_not_swallowed():
 
 
 def test_no_traces_reports_it_rather_than_rendering_nothing():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = _chart_result({})
     at.run()
 
@@ -499,7 +502,7 @@ def stub_summary_writer(monkeypatch):
 
 def test_no_export_control_before_a_run():
     # Nothing to export until a run has produced results.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.run()
 
     assert not at.exception
@@ -514,7 +517,7 @@ def test_no_export_control_for_a_cancelled_run():
         risk_dir_results=[RiskDirRunResult("TLR-TEST", _make_fake_assessment(), [])],
         cancelled=True,
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = fake_result
     at.run()
 
@@ -524,7 +527,7 @@ def test_no_export_control_for_a_cancelled_run():
 
 
 def test_completed_run_offers_the_export_control_but_no_download_yet():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = _chart_result({})
     at.run()
 
@@ -548,7 +551,7 @@ def test_export_click_builds_a_zip_and_offers_it_for_download(tmp_path, stub_sum
         ],
         cancelled=False,
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=120)
+    at = make_app_test(default_timeout=120)
     at.session_state["run_result"] = fake_result
     at.run()
     _export_buttons(at)[0].click().run()
@@ -579,7 +582,7 @@ def test_export_click_builds_a_zip_and_offers_it_for_download(tmp_path, stub_sum
 def test_export_failure_surfaces_as_an_error_and_offers_no_download():
     # save_dir has no metadata.json (and does not exist at all), so the export
     # must fail loudly rather than hand over a summary-free zip.
-    at = AppTest.from_file("streamlit_app.py", default_timeout=30)
+    at = make_app_test(default_timeout=30)
     at.session_state["run_result"] = _chart_result({})
     at.run()
     _export_buttons(at)[0].click().run()
@@ -602,7 +605,7 @@ def test_export_reports_the_charts_it_skipped(tmp_path, stub_summary_writer):
         ],
         cancelled=False,
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=120)
+    at = make_app_test(default_timeout=120)
     at.session_state["run_result"] = fake_result
     at.run()
     _export_buttons(at)[0].click().run()
@@ -649,14 +652,14 @@ def test_export_chart_files_names_every_rendered_chart_by_tlr_profile_and_stage(
 # ---------------------------------------------------------------------------
 
 def _editor_app():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = make_app_test(default_timeout=60)
     at.run()
     at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
     return at
 
 
 def test_config_source_defaults_to_the_library_so_the_existing_flow_is_unchanged():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = make_app_test(default_timeout=60)
     at.run()
 
     assert at.radio(key="config_source").value == streamlit_app.SOURCE_LIBRARY
@@ -877,7 +880,7 @@ def _app_showing_a_run_of(duration_hours, assessment=None):
         "override_config": [{"sim_id": "pre-Loop_NoMitigations_t1_median",
                              "duration_hours": duration_hours}],
     }
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = make_app_test(default_timeout=60)
     at.session_state["run_result"] = RunResult(
         save_dir="/tmp/Risk_Run_duration",
         risk_dir_results=[
@@ -993,7 +996,7 @@ def test_an_eight_hour_runs_catastrophic_findings_are_left_alone():
 
 def test_a_library_runs_catastrophic_findings_are_left_alone():
     """No generated configs means no known duration -- nothing to claim either way."""
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = make_app_test(default_timeout=60)
     at.session_state["run_result"] = RunResult(
         save_dir="/tmp/Risk_Run_library",
         risk_dir_results=[
@@ -1008,7 +1011,7 @@ def test_a_library_runs_catastrophic_findings_are_left_alone():
 
 
 def test_a_library_run_is_never_marked_since_this_feature_did_not_set_its_duration():
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = make_app_test(default_timeout=60)
     at.session_state["run_result"] = RunResult(
         save_dir="/tmp/Risk_Run_library",
         risk_dir_results=[RiskDirRunResult("TLR-LIB", _make_fake_assessment(), [], {})],
@@ -1035,7 +1038,7 @@ class _StubThread:
 
 def _app_with_completed_run():
     """An app showing a completed library run, the way a user leaves one on screen."""
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = make_app_test(default_timeout=60)
     at.session_state["run_result"] = RunResult(
         save_dir="/tmp/Risk_Run_x",
         risk_dir_results=[RiskDirRunResult("TLR-1117_bike", _make_fake_assessment(), [], {})],
@@ -1085,7 +1088,7 @@ def test_a_run_in_flight_is_never_clobbered_by_a_source_switch():
         save_dir="/tmp/Risk_Run_inflight",
         risk_dir_results=[RiskDirRunResult("TLR-INFLIGHT", _make_fake_assessment(), [], {})],
     )
-    at = AppTest.from_file("streamlit_app.py", default_timeout=60)
+    at = make_app_test(default_timeout=60)
     at.session_state["run_thread"] = _StubThread(alive=True)
     at.session_state["run_result"] = in_flight
     at.run()

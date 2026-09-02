@@ -120,10 +120,10 @@ def test_real_run_completes_end_to_end_through_the_launched_app():
     # config (flagged separately); TLR-QAE-482-test is known-good.
     os.environ.setdefault("LOOP_RISK_GUI_ALLOWED_COLLECTIONS", REAL_COLLECTION)
 
-    from streamlit.testing.v1 import AppTest
+    from conftest import make_app_test
 
     app_path = os.path.join(BUNDLE_DIR, "streamlit_app.py")
-    at = AppTest.from_file(app_path, default_timeout=60)
+    at = make_app_test(app_path, default_timeout=60)
     at.run()
 
     at.selectbox[0].select(REAL_COLLECTION).run()

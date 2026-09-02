@@ -34,7 +34,10 @@ import numpy as np
 import pytest
 
 pytest.importorskip("streamlit")
-from streamlit.testing.v1 import AppTest  # noqa: E402
+# The shared AppTest factory (tests/conftest.py). It builds the harness with the
+# TRSET-34 start-page gate already acknowledged, so these suites drive the tool
+# directly, as they did before the start page existed.
+from conftest import make_app_test  # noqa: E402
 
 from tidepool_data_science_simulator.utils import PROJECT_ROOT_DIR  # noqa: E402
 from tidepool_data_science_simulator.trace import read_trace  # noqa: E402
@@ -208,7 +211,7 @@ def test_grouping_yields_one_profile_row_with_the_absent_stage_missing(real_run)
 def test_app_renders_present_stages_as_charts_and_the_absent_stage_as_no_data(
     real_run_result,
 ):
-    at = AppTest.from_file("streamlit_app.py", default_timeout=180)
+    at = make_app_test(default_timeout=180)
     # The real RunResult the runner returned, handed to the app exactly as the
     # background run thread hands it over.
     at.session_state["run_result"] = real_run_result

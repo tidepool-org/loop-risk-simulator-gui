@@ -42,7 +42,10 @@ import pandas as pd
 import pytest
 
 pytest.importorskip("streamlit")
-from streamlit.testing.v1 import AppTest  # noqa: E402
+# The shared AppTest factory (tests/conftest.py). It builds the harness with the
+# TRSET-34 start-page gate already acknowledged, so these suites drive the tool
+# directly, as they did before the start page existed.
+from conftest import make_app_test  # noqa: E402
 
 from tidepool_data_science_simulator.projects.risk.gui_runner import (  # noqa: E402
     validate_config_dir,
@@ -115,7 +118,7 @@ def temp_library(tmp_path_factory):
 
 def _short_term_app(hours):
     """An editor with the short-term option selected and `hours` entered."""
-    at = AppTest.from_file("streamlit_app.py", default_timeout=RUN_TIMEOUT_SECONDS)
+    at = make_app_test(default_timeout=RUN_TIMEOUT_SECONDS)
     at.run()
     at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
     at.radio(key="sim_duration_choice").set_value(
@@ -127,7 +130,7 @@ def _short_term_app(hours):
 
 def _preset_app(hours):
     """An editor with the preset option for `hours` selected."""
-    at = AppTest.from_file("streamlit_app.py", default_timeout=RUN_TIMEOUT_SECONDS)
+    at = make_app_test(default_timeout=RUN_TIMEOUT_SECONDS)
     at.run()
     at.radio(key="config_source").set_value(streamlit_app.SOURCE_CONFIGURE).run()
     at.radio(key="sim_duration_choice").set_value(DURATION_LABEL_BY_HOURS[hours]).run()
