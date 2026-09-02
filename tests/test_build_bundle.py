@@ -207,7 +207,7 @@ def test_build_bundle_assembles_expected_tree(tmp_path, monkeypatch):
 
     out_dir = tmp_path / "dist"
     stamp = build_bundle.build_bundle(
-        version="0.1.0",
+        version=build_bundle.APP_VERSION,
         simulator_ref="gui-bundle-v0.1.0",
         simulator_repo="/fake/sim",
         swift_repo="/fake/swift",
@@ -217,6 +217,10 @@ def test_build_bundle_assembles_expected_tree(tmp_path, monkeypatch):
         built_at="2026-07-22T00:00:00+00:00",
     )
 
+    assert stamp["bundle_version"] == build_bundle.APP_VERSION
+    assert os.path.basename(stamp["archive_path"]) == (
+        f"loop-risk-simulator-gui-{build_bundle.APP_VERSION}.tar.gz"
+    )
     assert stamp["simulator_sha"] == "sha-gui-bundle-v0.1.0"
     assert stamp["swift_sha"] == "sha-HEAD"
 
@@ -335,7 +339,7 @@ def test_build_bundle_raises_before_producing_an_archive(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match=r"unstaged_module\.py"):
         build_bundle.build_bundle(
-            version="0.1.0",
+            version=build_bundle.APP_VERSION,
             simulator_ref="gui-bundle-v0.1.0",
             simulator_repo="/fake/sim",
             swift_repo="/fake/swift",
@@ -346,3 +350,34 @@ def test_build_bundle_raises_before_producing_an_archive(tmp_path, monkeypatch):
         )
 
     assert not out_dir.exists()  # no half-built archive to publish
+
+
+# --- TRSET-35: one version constant governs app and bundle alike -----------
+
+def test_resolve_version_defaults_to_the_app_constant():
+    import version
+
+    assert build_bundle.APP_VERSION == version.APP_VERSION
+    assert build_bundle.resolve_version() == version.APP_VERSION
+    assert build_bundle.resolve_version(None) == version.APP_VERSION
+
+
+def test_resolve_version_accepts_an_agreeing_explicit_value():
+    assert build_bundle.resolve_version(build_bundle.APP_VERSION) == build_bundle.APP_VERSION
+
+
+def test_resolve_version_raises_on_a_disagreeing_explicit_value():
+    """No silent mismatch: a bundle numbered differently from the app inside it is
+    the drift this collapses, so the build stops instead of picking a winner."""
+    with pytest.raises(ValueError, match=r"disagrees with APP_VERSION"):
+        build_bundle.resolve_version("9.9.9")
+
+
+def test_version_py_is_staged_so_the_bundled_app_can_import_it():
+    assert "version.py" in build_bundle.APP_ARTIFACTS
+    # Provable rather than asserted: streamlit_app.py imports it, so the drift
+    # guard is what enforces this -- dropping it from the list raises.
+    with pytest.raises(ValueError, match=r"version\.py"):
+        build_bundle.verify_app_artifacts_complete(
+            REPO_ROOT, [a for a in build_bundle.APP_ARTIFACTS if a != "version.py"]
+        )

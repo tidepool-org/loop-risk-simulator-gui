@@ -52,15 +52,17 @@ then publish it as a GitHub Release asset:
 
 ```bash
 python packaging/build_bundle.py build \
-  --version 0.1.0 \
   --simulator-ref main \
   --simulator-repo ../data-science-simulator \
   --swift-repo ../LoopAlgorithmToPython \
   --output-dir dist/
 ```
 
-The build refuses to run if a local module `streamlit_app.py` imports is missing
-from `APP_ARTIFACTS` (see "Bundled app artifacts" below).
+The release number comes from `version.py` (see "Versioning" below), so
+`--version` is optional; passing one that disagrees with `APP_VERSION` fails the
+build rather than producing an archive numbered differently from the app inside
+it. The build also refuses to run if a local module `streamlit_app.py` imports is
+missing from `APP_ARTIFACTS` (see "Bundled app artifacts" below).
 
 **Before publishing, run the bundle-boundary test against the bundle you just
 built.** It is the only check that a built bundle actually launches; the
@@ -79,6 +81,34 @@ The bundle's `run_simulator_gui.command` establishes the arm64 env from the
 pinned spec, builds the Swift `.dylib` on first run, symlinks the vendored paths
 beside the package, and launches the app. (The polished colleague-facing
 launcher UX is Phase 5.)
+
+## Versioning
+
+`version.py`'s `APP_VERSION` is the single source of the app's version number.
+The app renders it in the shared page header on every page, and
+`packaging/build_bundle.py` reads the same constant for the archive name,
+`BUNDLE_VERSION.json`'s `bundle_version`, and the `gui-bundle-v<version>` release
+tag. There is deliberately no second source: there is no `pyproject.toml`, so
+`importlib.metadata` has no distribution to read; `BUNDLE_VERSION.json` exists
+only inside a built bundle; and `git describe` fails in the shipped tarball.
+
+Semantic versioning per **SOP-0005 §7.1**, read for this GUI as:
+
+| Component | Bump when | SOP-0005 |
+|---|---|---|
+| **MAJOR** | Significant new capability, or a major change to what the user sees | §7.1.1.1 |
+| **MINOR** | An ordinary new feature; a cosmetic or content change | §7.1.2.1–2 |
+| **PATCH** | An anomaly (bug) fix — nothing else | §7.1.3.1 |
+
+`1.0.0` is the **MVP internal** release.
+
+The displayed number means **the last released version**, not the state of the
+working tree. It is bumped by hand as part of making a release, not on ticket
+merge, and nothing enforces that — no CI check, no pre-commit hook, no
+dirty-tree suffix. A checkout between releases therefore shows the number of the
+release it followed. Build metadata (SOP-0005 §7.1.4, optional) is deliberately
+not displayed; per-build provenance — the simulator ref and both resolved SHAs —
+stays in the bundle's `BUNDLE_VERSION.json`.
 
 ## Running tests
 
@@ -613,3 +643,33 @@ level of indirection. It proves the files are *staged*, not that the bundle
 opt-in and has not been run since TRSET-7. Running it needs a real arm64 conda
 env and a built bundle; until it runs, this fix is verified by unit tests alone.
 `LICENSE` is still unstaged (a separate call, not an `ImportError`).
+
+## Version number in the header (TRSET-35)
+
+**What changed (≤100 words):** The app displayed no version anywhere, and the
+only version concept was build-time — `build_bundle.py`'s required `--version`,
+which nothing tied to the running app, so the two could disagree silently. A new
+`version.py` holds `APP_VERSION = "1.0.0"` and is now the single source for both:
+the app renders `Version 1.0.0` in the shared header, above the start-page gate,
+so every page carries it from one insertion point; `--version` becomes optional,
+defaults to the constant, and raises if given a value that disagrees. `version.py`
+ships in the bundle. See "Versioning" above for the SOP-0005 §7.1 reading.
+
+**Validation (≤100 words):** `tests/test_trset35_integration.py` drives the real
+app through a bare `AppTest` in four phases: the version on the unacknowledged
+start-page render and still there after a real `Got it` click; the string
+asserted against `version.APP_VERSION` rather than a literal, with a mutation
+that repoints the constant and watches the screen follow; all three release
+artifacts carrying `APP_VERSION`, with a disagreeing `--version` raising before
+any archive exists; and `version.py` present in the built tree with its real
+contents. Suite: 342 passed, 7 skipped.
+
+**Cautions / limitations:** Rendered with `st.markdown`, not `st.caption`, on a
+measured finding: Streamlit fades captions with `opacity: 0.6` on the caption
+container, compositing the theme's `#281946` to `#7E7590` on white — **4.34:1**,
+under the 4.5:1 WCAG 1.4.3 minimum for normal text (14px, weight 400, so the
+large-text allowance does not apply). Measured in a running app on 2026-09-02 and
+pinned by `test_accessibility.py`. The number is bumped manually and nothing
+enforces it, so a stale number is possible between releases. Phases 3–4 mock the
+git boundary (`resolve_ref`/`extract_tree_paths`) as `test_build_bundle.py` does;
+the app repo they build from is real.
