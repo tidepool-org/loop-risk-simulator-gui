@@ -59,6 +59,20 @@ python packaging/build_bundle.py build \
   --output-dir dist/
 ```
 
+The build refuses to run if a local module `streamlit_app.py` imports is missing
+from `APP_ARTIFACTS` (see "Bundled app artifacts" below).
+
+**Before publishing, run the bundle-boundary test against the bundle you just
+built.** It is the only check that a built bundle actually launches; the
+build-time guard proves the files are staged, not that the app starts:
+
+```bash
+tar -xzf dist/loop-risk-simulator-gui-<version>.tar.gz -C /tmp/bundle-check
+export LOOP_RISK_GUI_BUNDLE_DIR=/tmp/bundle-check
+cd /tmp && ~/miniconda3/envs/<bundle-env>/bin/python -m pytest \
+  <gui-repo>/tests/test_phase4_bundle_integration.py
+```
+
 The builder prints the exact `gh release create …` command to publish the
 archive — publishing is a deliberate, separate step, never run automatically.
 The bundle's `run_simulator_gui.command` establishes the arm64 env from the
@@ -570,3 +584,32 @@ occurrence the acronym's expansion, which has no "Loop" in it. So the
 UI renames: no export filename, no RTF content, no export-bundle path
 contained the name, so there is no downstream break. The launcher's
 "Tidepool Loop Risk Simulator GUI" is a different name and was left alone.
+
+## Bundled app artifacts (TRSET-47)
+
+**What changed (≤100 words):** `APP_ARTIFACTS` staged five of the app's nine
+runtime artifacts. `streamlit_app.py` imports `loop_home_renderer`,
+`export_bundle`, `meal_config` and `start_page` at module level and none was
+staged, so the builder produced a bundle that raised `ModuleNotFoundError` on the
+colleague's first double-click — after env provisioning had already succeeded.
+The four names are added, and `pytest.ini` with them, so the bundled `tests/` run
+under the repo's markers. The list was correct at Phase 4; TRSET-7, TRSET-9,
+TRSET-22 and TRSET-34 each added a module without updating it, so a guard now
+makes the list self-maintaining.
+
+**Validation (≤100 words):** `verify_app_artifacts_complete()` parses
+`streamlit_app.py` with `ast` — stdlib-only, parse-only, never imported — resolves
+which imports are local by what exists in the repo (a second hardcoded list would
+be the same defect one level up), and raises before any git or staging work.
+Scope is one level of indirection, bounded on purpose. `test_build_bundle.py`
+runs the guard against the **real** repo and mutation-checks it per module:
+dropping any one of the four raises, and removing the call itself was observed to
+fail the build-level test. Suite: 324 passed, 7 skipped.
+
+**Cautions / limitations:** The guard reads module-level imports only — an import
+nested inside a function or an `if` is not seen — and does not walk past one
+level of indirection. It proves the files are *staged*, not that the bundle
+*launches*: only `tests/test_phase4_bundle_integration.py` does that, and it is
+opt-in and has not been run since TRSET-7. Running it needs a real arm64 conda
+env and a built bundle; until it runs, this fix is verified by unit tests alone.
+`LICENSE` is still unstaged (a separate call, not an `ImportError`).

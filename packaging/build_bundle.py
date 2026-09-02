@@ -36,6 +36,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import glob
 import json
@@ -44,7 +45,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-from typing import List
+from typing import Dict, List, Optional, Set
 
 # Paths (relative to the simulator repo root) that the installed simulator
 # package does NOT carry but the GUI needs at runtime -- extracted from the pin.
@@ -58,13 +59,26 @@ SIMULATOR_VENDOR_PATHS: List[str] = [
 ]
 
 # Files/dirs copied verbatim from the GUI repo into the bundle.
+# Every local module streamlit_app.py imports must appear here or the bundle
+# raises ImportError on first run -- verify_app_artifacts_complete() below is the
+# guard that makes that a build-time failure instead of a first-double-click one.
+# pytest.ini rides along with tests/ so the bundled suite runs under the same
+# marker config as the repo (its `-m "not slow"` deselects the real 24h run).
 APP_ARTIFACTS: List[str] = [
     "streamlit_app.py",
+    "export_bundle.py",
+    "loop_home_renderer.py",
+    "meal_config.py",
+    "start_page.py",
     "Tidepool_Logo_Light_Large_3000.jpg",
     "README.md",
     ".streamlit",
+    "pytest.ini",
     "tests",
 ]
+
+# The app module the guard starts from: the bundle's entry point.
+APP_ENTRY_POINT = "streamlit_app.py"
 
 BUNDLE_ENV_FILENAME = "conda-environment.yml"
 SWIFT_VENDOR_RELPATH = "./vendor/LoopAlgorithmToPython"
@@ -163,6 +177,98 @@ def stage_app_code(app_repo: str, dest: str, artifacts: List[str]) -> None:
             shutil.copy2(src, target)
 
 
+def _module_level_imports(source_path: str) -> Set[str]:
+    """Top-level module names imported at module level by the file at `source_path`.
+
+    Parsed with `ast`, never executed and never imported: the builder is
+    stdlib-only, and importing streamlit_app here would pull streamlit, pandas and
+    the simulator into the build. Only statements in the module body are read --
+    an import nested inside a function or an `if` is not seen (bounded on purpose;
+    the failure this guards is the module-level import that makes the bundle die
+    before it renders).
+    """
+    with open(source_path) as fh:
+        tree = ast.parse(fh.read(), filename=source_path)
+
+    names: Set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+def _local_module_artifact(app_repo: str, module: str) -> Optional[str]:
+    """The artifact name that stages `module`, or None if it is not a local module.
+
+    "Local" is decided by what exists in the app repo -- a second hardcoded list of
+    module names would be the same drift defect one level up.
+    """
+    if os.path.isfile(os.path.join(app_repo, f"{module}.py")):
+        return f"{module}.py"
+    if os.path.isfile(os.path.join(app_repo, module, "__init__.py")):
+        return module
+    return None
+
+
+def _local_imports(app_repo: str, source_path: str) -> Dict[str, str]:
+    """{module name: artifact name} for the local modules `source_path` imports."""
+    found: Dict[str, str] = {}
+    for name in _module_level_imports(source_path):
+        artifact = _local_module_artifact(app_repo, name)
+        if artifact is not None:
+            found[name] = artifact
+    return found
+
+
+def verify_app_artifacts_complete(
+    app_repo: str, artifacts: List[str], entry_point: str = APP_ENTRY_POINT
+) -> None:
+    """Raise if a local module the app imports would not be staged into the bundle.
+
+    `stage_app_code` only raises for artifacts it was TOLD to copy, so a module
+    missing from `artifacts` produces a bundle that builds cleanly and then dies
+    with ImportError on the colleague's first double-click. This turns that into a
+    build-time failure. TRSET-7, TRSET-9, TRSET-22 and TRSET-34 each added a module
+    without updating the list; adding their four names fixes today, this stops the
+    next one.
+
+    Scope is one level of indirection, explicitly bounded: the entry point's own
+    local imports, plus the local imports of each module it imports. Not a full
+    dependency walk.
+    """
+    staged = set(artifacts)
+    missing: Dict[str, str] = {}  # artifact -> the file that imports it
+
+    if entry_point not in staged:
+        missing[entry_point] = "the bundle entry point"
+
+    direct = _local_imports(app_repo, os.path.join(app_repo, entry_point))
+    for artifact in direct.values():
+        if artifact not in staged:
+            missing.setdefault(artifact, entry_point)
+
+    for module, artifact in sorted(direct.items()):
+        module_path = os.path.join(app_repo, f"{module}.py")
+        if not os.path.isfile(module_path):
+            continue  # a package: its own modules ship inside the staged directory
+        for sub_artifact in _local_imports(app_repo, module_path).values():
+            if sub_artifact not in staged:
+                missing.setdefault(sub_artifact, f"{module}.py")
+
+    if missing:
+        detail = "; ".join(
+            f"{artifact} (imported by {importer})" for artifact, importer in sorted(missing.items())
+        )
+        raise ValueError(
+            f"App artifacts incomplete -- the bundle would raise ImportError on "
+            f"first run: {detail}. Add the missing name(s) to APP_ARTIFACTS in "
+            f"packaging/build_bundle.py."
+        )
+
+
 def _strip_prebuilt_dylibs(root: str) -> List[str]:
     """Remove every ``*.dylib`` under ``root``; return the removed paths (sorted).
 
@@ -232,6 +338,10 @@ def build_bundle(
 
     Orchestration only -- each step is a single-responsibility helper above.
     """
+    # Fail before any git or staging work: a build that would produce a bundle
+    # dead on first run should not produce an archive at all.
+    verify_app_artifacts_complete(app_repo, APP_ARTIFACTS)
+
     bundle_name = f"loop-risk-simulator-gui-{version}"
     simulator_sha = resolve_ref(simulator_repo, simulator_ref)
     swift_sha = resolve_ref(swift_repo, swift_ref)

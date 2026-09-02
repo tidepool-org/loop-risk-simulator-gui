@@ -5,10 +5,14 @@ Tests the packaging logic in isolation: env-spec rendering (pin resolution +
 Swift-line swap), version stamping, app-code staging, publish-command format,
 and full assembly with the git boundary (resolve_ref / extract_tree_paths)
 mocked so no network, git, or real simulator checkout is needed.
+
+Also covers the TRSET-47 artifact-drift guard, which parses the app's imports and
+fails the build when a local module is missing from APP_ARTIFACTS.
 """
 
 import json
 import os
+import re
 import sys
 import tarfile
 
@@ -16,6 +20,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "packaging"))
 import build_bundle  # noqa: E402
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 _SOURCE_ENV = """\
@@ -34,6 +40,51 @@ def _write_source_env(tmp_path):
     p = tmp_path / "conda-environment.yml"
     p.write_text(_SOURCE_ENV)
     return str(p)
+
+
+# Mirrors how the real streamlit_app.py imports its four local modules (both
+# `import x` and `from x import y` forms), so a synthetic repo exercises the
+# drift guard the same way the real one does.
+_ENTRY_SOURCE = """\
+import meal_config
+import start_page
+from export_bundle import build_export_zip
+from loop_home_renderer import render_loop_home_screen
+"""
+
+
+def _make_app_repo(tmp_path, entry_source=_ENTRY_SOURCE, extra_modules=None):
+    """A synthetic GUI repo carrying every APP_ARTIFACTS entry, plus the files the
+    builder stages from packaging/. Driven off APP_ARTIFACTS itself so a future
+    addition to the list does not silently leave this fixture behind."""
+    app = tmp_path / "gui"
+    (app / "packaging" / "templates").mkdir(parents=True)
+    (app / ".streamlit").mkdir()
+    (app / "tests").mkdir()
+    (app / "streamlit_app.py").write_text(entry_source)
+    for artifact in build_bundle.APP_ARTIFACTS:
+        target = app / artifact
+        if not target.exists():
+            target.write_text(f"# {artifact}\n")
+    (app / "conda-environment.yml").write_text(_SOURCE_ENV)
+    (app / "packaging" / "templates" / "run_simulator_gui.command").write_text("#!/bin/bash\n")
+    (app / "packaging" / "launcher.py").write_text("# launcher helper\n")
+    for name, source in (extra_modules or {}).items():
+        (app / name).write_text(source)
+    return app
+
+
+def _mock_git_boundary(monkeypatch):
+    """resolve_ref returns a fake SHA; extract_tree_paths drops a marker file."""
+    monkeypatch.setattr(build_bundle, "resolve_ref", lambda repo, ref: f"sha-{ref}")
+
+    def fake_extract(repo, ref, paths, dest):
+        os.makedirs(dest, exist_ok=True)
+        marker = "swift" if "LoopAlgorithmToPython" in dest else "sim"
+        with open(os.path.join(dest, f"_{marker}_extracted"), "w") as fh:
+            fh.write(ref)
+
+    monkeypatch.setattr(build_bundle, "extract_tree_paths", fake_extract)
 
 
 # --- render_env_spec -------------------------------------------------------
@@ -151,29 +202,8 @@ def test_vendor_swift_strips_committed_dylib(tmp_path, monkeypatch):
 # --- full assembly with the git boundary mocked ----------------------------
 
 def test_build_bundle_assembles_expected_tree(tmp_path, monkeypatch):
-    # Fake GUI repo
-    app = tmp_path / "gui"
-    (app / "packaging" / "templates").mkdir(parents=True)
-    (app / ".streamlit").mkdir()
-    (app / "tests").mkdir()
-    (app / "streamlit_app.py").write_text("# app")
-    (app / "Tidepool_Logo_Light_Large_3000.jpg").write_text("jpg")
-    (app / "README.md").write_text("# readme")
-    (app / "conda-environment.yml").write_text(_SOURCE_ENV)
-    (app / "packaging" / "templates" / "run_simulator_gui.command").write_text("#!/bin/bash\n")
-    (app / "packaging" / "launcher.py").write_text("# launcher helper\n")
-
-    # Mock the git boundary: resolve_ref returns a fake SHA; extract_tree_paths
-    # drops a marker file so we can assert vendoring happened.
-    monkeypatch.setattr(build_bundle, "resolve_ref", lambda repo, ref: f"sha-{ref}")
-
-    def fake_extract(repo, ref, paths, dest):
-        os.makedirs(dest, exist_ok=True)
-        marker = "swift" if "LoopAlgorithmToPython" in dest else "sim"
-        with open(os.path.join(dest, f"_{marker}_extracted"), "w") as fh:
-            fh.write(ref)
-
-    monkeypatch.setattr(build_bundle, "extract_tree_paths", fake_extract)
+    app = _make_app_repo(tmp_path)
+    _mock_git_boundary(monkeypatch)
 
     out_dir = tmp_path / "dist"
     stamp = build_bundle.build_bundle(
@@ -194,7 +224,15 @@ def test_build_bundle_assembles_expected_tree(tmp_path, monkeypatch):
     assert os.path.isfile(archive)
     with tarfile.open(archive) as tar:
         names = set(tar.getnames())
-    assert "./streamlit_app.py" in names
+    # Every artifact the builder claims to stage is actually in the tree. Driven
+    # off APP_ARTIFACTS so the assertion cannot drift away from the list.
+    for artifact in build_bundle.APP_ARTIFACTS:
+        assert f"./{artifact}" in names, artifact
+    # The four modules TRSET-47 found missing, named explicitly: their absence is
+    # the ImportError the bundle used to die with on first run.
+    for module in ("export_bundle.py", "loop_home_renderer.py", "meal_config.py", "start_page.py"):
+        assert f"./{module}" in names
+    assert "./pytest.ini" in names      # bundled tests run under the repo's markers
     assert "./conda-environment.yml" in names
     assert "./run_simulator_gui.command" in names
     assert "./launcher.py" in names
@@ -207,3 +245,104 @@ def test_build_bundle_assembles_expected_tree(tmp_path, monkeypatch):
         member = tar.extractfile("./conda-environment.yml").read().decode()
     assert "data-science-simulator@gui-bundle-v0.1.0" in member
     assert build_bundle.SWIFT_VENDOR_RELPATH in member
+
+
+# --- TRSET-47: the app-artifact drift guard --------------------------------
+
+def test_app_artifacts_cover_this_repos_own_imports():
+    """The real list against the real app. This is the assertion that was missing
+    while TRSET-7, TRSET-9, TRSET-22 and TRSET-34 each landed a module without
+    touching APP_ARTIFACTS -- four bundles that would have died on first run."""
+    build_bundle.verify_app_artifacts_complete(REPO_ROOT, build_bundle.APP_ARTIFACTS)
+
+
+@pytest.mark.parametrize(
+    "dropped",
+    ["export_bundle.py", "loop_home_renderer.py", "meal_config.py", "start_page.py"],
+)
+def test_guard_fires_when_any_real_app_module_is_dropped(dropped):
+    """Mutation check, one artifact at a time: a guard against a silent-omission
+    bug is worthless if it still passes while the omission is possible."""
+    trimmed = [a for a in build_bundle.APP_ARTIFACTS if a != dropped]
+    with pytest.raises(ValueError, match=re.escape(dropped)):
+        build_bundle.verify_app_artifacts_complete(REPO_ROOT, trimmed)
+
+
+def test_guard_fires_when_the_entry_point_itself_is_unstaged():
+    trimmed = [a for a in build_bundle.APP_ARTIFACTS if a != build_bundle.APP_ENTRY_POINT]
+    with pytest.raises(ValueError, match=re.escape(build_bundle.APP_ENTRY_POINT)):
+        build_bundle.verify_app_artifacts_complete(REPO_ROOT, trimmed)
+
+
+def test_guard_ignores_stdlib_and_third_party_imports(tmp_path):
+    """Only modules that exist in the app repo are required -- "local" is decided by
+    the repo's contents, not by a second hardcoded name list."""
+    app = _make_app_repo(
+        tmp_path,
+        entry_source="import os\nimport streamlit as st\nfrom pandas import DataFrame\n",
+    )
+    build_bundle.verify_app_artifacts_complete(str(app), build_bundle.APP_ARTIFACTS)
+
+
+def test_guard_follows_one_level_of_indirection(tmp_path):
+    """A staged module that itself imports an unstaged local module also raises."""
+    app = _make_app_repo(
+        tmp_path,
+        entry_source="import meal_config\n",
+        extra_modules={"meal_config.py": "import helper\n", "helper.py": "# local\n"},
+    )
+    with pytest.raises(ValueError, match=r"helper\.py \(imported by meal_config\.py\)"):
+        build_bundle.verify_app_artifacts_complete(str(app), build_bundle.APP_ARTIFACTS)
+
+
+def test_guard_does_not_walk_past_one_level(tmp_path):
+    """The bound is explicit: helper.py's own local import is NOT chased. This
+    documents the limit rather than leaving it to be discovered."""
+    app = _make_app_repo(
+        tmp_path,
+        entry_source="import meal_config\n",
+        extra_modules={
+            "meal_config.py": "import helper\n",
+            "helper.py": "import deep\n",
+            "deep.py": "# third level, unstaged and unchecked\n",
+        },
+    )
+    build_bundle.verify_app_artifacts_complete(
+        str(app), build_bundle.APP_ARTIFACTS + ["helper.py"]
+    )
+
+
+def test_guard_parses_the_app_without_executing_it(tmp_path):
+    """Parse-only, per the stdlib-only constraint: importing streamlit_app here
+    would pull streamlit, pandas and the simulator into the build."""
+    app = _make_app_repo(
+        tmp_path,
+        entry_source="import meal_config\nraise SystemExit('app code was executed')\n",
+    )
+    build_bundle.verify_app_artifacts_complete(str(app), build_bundle.APP_ARTIFACTS)
+
+
+def test_build_bundle_raises_before_producing_an_archive(tmp_path, monkeypatch):
+    """The whole point: a build that would ship a non-starting bundle fails at
+    build time, and leaves no archive behind to be published by mistake."""
+    app = _make_app_repo(
+        tmp_path,
+        entry_source=_ENTRY_SOURCE + "import unstaged_module\n",
+        extra_modules={"unstaged_module.py": "# never added to APP_ARTIFACTS\n"},
+    )
+    _mock_git_boundary(monkeypatch)
+    out_dir = tmp_path / "dist"
+
+    with pytest.raises(ValueError, match=r"unstaged_module\.py"):
+        build_bundle.build_bundle(
+            version="0.1.0",
+            simulator_ref="gui-bundle-v0.1.0",
+            simulator_repo="/fake/sim",
+            swift_repo="/fake/swift",
+            swift_ref="HEAD",
+            app_repo=str(app),
+            output_dir=str(out_dir),
+            built_at="2026-07-22T00:00:00+00:00",
+        )
+
+    assert not out_dir.exists()  # no half-built archive to publish
