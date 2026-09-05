@@ -320,6 +320,55 @@ DURATION_LABELS = {
     SHORT_TERM_DURATION_LABEL: None,
 }
 
+# Controller settings and dosing strategy (TRSET-15). Both are chosen once for the
+# whole configuration and reach every generated stage, so they are asked alongside
+# the duration rather than per entry.
+#
+# NOTE: the info text and tooltips below are written from the ticket's described
+# behaviour, not copied from its verbatim UI copy, which is not recorded in the
+# request. Replace with the ticket's own wording when it is to hand -- the tests
+# assert these constants, not the strings, so swapping the text is a one-line change.
+CONTROLLER_SETTINGS_KEY = "controller_settings_group"
+CONTROLLER_SETTINGS_LABEL = "Controller settings"
+CONTROLLER_SETTINGS_INFO = (
+    "Choose which released version of Tidepool Loop's controller settings the "
+    "generated configurations run against. This applies to every stage and every "
+    "profile in the configuration."
+)
+CONTROLLER_SETTINGS_HELP = {
+    "Tidepool Loop 2.x": (
+        "The current Tidepool Loop controller settings. Supports both autobolus and "
+        "temp-basal dosing."
+    ),
+    "Tidepool Loop 1.x": (
+        "The earlier Tidepool Loop controller settings, for comparing a situation "
+        "against pre-autobolus behaviour. Temp-basal dosing only."
+    ),
+}
+
+DOSING_STRATEGY_KEY = "dosing_strategy"
+DOSING_STRATEGY_LABEL = "Dosing strategy"
+DOSING_STRATEGY_INFO = (
+    "Choose how Loop delivers the insulin it recommends. This applies to both "
+    "Loop-enabled stages; the No Loop stage is unaffected."
+)
+
+
+def _dosing_strategy_help():
+    """Per-option tooltips. Built at call time so the percentage is read, not fixed."""
+    percent = meal_config.autobolus_application_factor() * 100
+    return {
+        meal_config.DOSING_AUTOBOLUS: (
+            f"Loop delivers {percent:g}% of the recommended correction as an "
+            f"automatic bolus, and the remainder through basal adjustment."
+        ),
+        meal_config.DOSING_TEMP_BASAL: (
+            "Loop delivers the whole recommendation through temporary basal rate "
+            "adjustment, with no automatic bolus."
+        ),
+    }
+
+
 # Said next to the picker rather than after the wait, so it informs the choice.
 LONG_RUN_COST_NOTE = (
     f"A {meal_config.DURATION_UNDERDELIVERY_HOURS:g}- or "
@@ -365,6 +414,54 @@ def _on_start_day(picked, window_start):
     meal_config validates against the real window and never assumes a single day.
     """
     return datetime.datetime.combine(window_start.date(), picked)
+
+
+def _render_controller_controls():
+    """The controller-settings and dosing-strategy pickers (TRSET-15).
+
+    Returns ``(settings_group, dosing_strategy)``. Both apply to the whole
+    configuration -- every stage, every profile -- so they are asked once, here,
+    beside the duration rather than per entry.
+
+    The two are coupled: a temp-basal-only group has no autobolus mode to offer, so
+    Autobolus is removed from the options rather than shown and ignored. The stored
+    selection is forced to Temp basal BEFORE the dosing radio renders -- if it were
+    left until after, a session that had Autobolus selected would carry that stale
+    value through one render while the config generated from it said otherwise.
+
+    Switching back to a group that does support autobolus leaves Temp basal selected
+    rather than restoring the previous choice. That is deliberate: the last thing the
+    user saw selected is what stays selected, and silently flipping a dosing strategy
+    back on their behalf is the worse surprise.
+    """
+    st.info(CONTROLLER_SETTINGS_INFO)
+    group_label = st.radio(
+        CONTROLLER_SETTINGS_LABEL,
+        options=[group.display for group in meal_config.SETTINGS_GROUPS],
+        captions=[CONTROLLER_SETTINGS_HELP[group.display] for group in meal_config.SETTINGS_GROUPS],
+        key=CONTROLLER_SETTINGS_KEY,
+    )
+    settings_group = next(
+        group for group in meal_config.SETTINGS_GROUPS if group.display == group_label
+    )
+
+    st.info(DOSING_STRATEGY_INFO)
+    dosing_help = _dosing_strategy_help()
+    if settings_group.temp_basal_only:
+        st.session_state[DOSING_STRATEGY_KEY] = meal_config.DOSING_TEMP_BASAL
+        options = [meal_config.DOSING_TEMP_BASAL]
+    else:
+        options = list(meal_config.DOSING_STRATEGIES)
+
+    dosing_strategy = st.radio(
+        DOSING_STRATEGY_LABEL,
+        options=options,
+        captions=[dosing_help[option] for option in options],
+        key=DOSING_STRATEGY_KEY,
+    )
+    if settings_group.temp_basal_only:
+        st.caption(meal_config.LOOP_1X_TEMP_BASAL_ONLY_NOTE)
+    return settings_group, dosing_strategy
 
 
 def _render_duration_control():
@@ -575,6 +672,8 @@ def _reset_generated_state() -> None:
     st.session_state.generated_configs = None
     st.session_state.generated_duration_hours = None
     st.session_state.generated_risk_description = None
+    st.session_state.generated_settings_group = None
+    st.session_state.generated_dosing_strategy = None
     st.session_state.generated_error = None
 
 
@@ -644,6 +743,23 @@ def _configs_risk_description(configs: dict) -> str:
     return configs[first]["metadata"]["risk_description"]
 
 
+def _configs_settings_group(configs: dict) -> str:
+    """The controller settings group a generated set carries, read back from its JSON.
+
+    Mirrors ``_configs_risk_description`` for the same reason: what the summary
+    reports, and what a radio change is compared against, are both what was actually
+    written. All four files carry the same value by construction.
+    """
+    first = next(iter(sorted(configs)))
+    return configs[first]["metadata"]["controller_settings_group"]
+
+
+def _configs_dosing_strategy(configs: dict) -> str:
+    """The dosing strategy a generated set carries, read back from its JSON."""
+    first = next(iter(sorted(configs)))
+    return configs[first]["metadata"]["dosing_strategy"]
+
+
 def _generated_temp_dir() -> str:
     """Session-scoped temp root the generated config library is written under.
 
@@ -672,6 +788,8 @@ def _generate_configs(spec) -> None:
         st.session_state.generated_configs = configs
         st.session_state.generated_duration_hours = _configs_duration_hours(configs)
         st.session_state.generated_risk_description = _configs_risk_description(configs)
+        st.session_state.generated_settings_group = _configs_settings_group(configs)
+        st.session_state.generated_dosing_strategy = _configs_dosing_strategy(configs)
         st.session_state.generated_error = None
         # No reset here: the new risk id changes the selection, and _sync_selection
         # clears the previous run for every way the selection can change.
@@ -698,6 +816,10 @@ def _render_generated_summary() -> None:
     st.success(f"Generated {len(configs)} config file(s) with risk id `{generated_risk_id}`.")
 
     st.caption(f"Risk description: {_configs_risk_description(configs)}")
+    st.caption(
+        f"Controller settings: {_configs_settings_group(configs)}. "
+        f"Dosing strategy: {_configs_dosing_strategy(configs)}."
+    )
 
     duration_hours = _configs_duration_hours(configs)
     st.caption(f"Simulation duration: {duration_hours:g} hours per stage.")
@@ -765,6 +887,24 @@ def _render_meal_config_editor():
     ):
         _reset_generated_state()
 
+    settings_group, dosing_strategy = _render_controller_controls()
+
+    # And a set built against a different controller, for the third time and the same
+    # reason: swapping the settings group changes base_config, and swapping the dosing
+    # strategy changes what the Loop stages override, so the generated set no longer
+    # answers the question the editor now asks. Compared against the RESOLVED strategy
+    # -- what the spec would actually write -- so that the forced Temp basal under
+    # Loop 1.x does not read as a change on every render.
+    resolved_dosing = (
+        meal_config.DOSING_TEMP_BASAL
+        if settings_group.temp_basal_only
+        else dosing_strategy
+    )
+    if st.session_state.generated_settings_group not in (None, settings_group.display):
+        _reset_generated_state()
+    if st.session_state.generated_dosing_strategy not in (None, resolved_dosing):
+        _reset_generated_state()
+
     window_start, _ = meal_config.authoring_window(duration_hours)
     st.caption(_window_caption(duration_hours))
 
@@ -804,6 +944,8 @@ def _render_meal_config_editor():
             patient_entries,
             duration_hours=duration_hours,
             risk_description=risk_description,
+            settings_group=settings_group,
+            dosing_strategy=dosing_strategy,
         )
     else:
         pump_entries = _entry_set_editor(
@@ -815,6 +957,8 @@ def _render_meal_config_editor():
             pump_entries,
             duration_hours=duration_hours,
             risk_description=risk_description,
+            settings_group=settings_group,
+            dosing_strategy=dosing_strategy,
         )
 
     if st.button("Generate configs"):
@@ -1011,6 +1155,11 @@ def _init_session_state():
         # The description the current set was generated with (TRSET-36), for the same
         # reason: changing it makes the set the record of a question no longer asked.
         "generated_risk_description": None,
+        # The controller axes the current set was generated with (TRSET-15). Same
+        # reason again: a set built for Loop 1.x is not the set the editor now
+        # describes once the radio says 2.x.
+        "generated_settings_group": None,
+        "generated_dosing_strategy": None,
         "generated_error": None,
         # The selection the page last rendered for, so a change can be detected and
         # the previous selection's results cleared. _UNSET (not a real selection) so

@@ -149,6 +149,58 @@ PROFILES: Tuple[Profile, ...] = (
 
 
 @dataclass(frozen=True)
+class ControllerSettingsGroup:
+    """One selectable Loop controller settings group (TRSET-15).
+
+    ``token`` is the base-simulation filename suffix -- ``base_<profile>_<token>``
+    -- so choosing a group is choosing which ``base_config`` pointer is written.
+    ``subdir`` is where those files live under ``reusable/simulations/``; the
+    pointer itself needs no subdirectory because ``load_pointer`` searches both,
+    but reading the base window off disk does.
+
+    ``temp_basal_only`` records that a group ships ``partial_application_factor``
+    0.0 in its own settings file and therefore has no autobolus mode at all. It
+    is a property of the released Loop version, not a UI preference, which is why
+    it lives here rather than in the app.
+    """
+    display: str
+    token: str
+    subdir: str
+    temp_basal_only: bool
+
+
+# The selectable groups, default first. Loop 1.x is temp-basal only: 1dotX.json
+# already carries partial_application_factor 0.0, and SwiftLoopController picks
+# recommendationType from the truthiness of that value alone, so "1.x + autobolus"
+# would mean overriding the very settings file the choice names -- and corresponds
+# to no released Loop, since autobolus arrived with 2.x.
+SETTINGS_GROUPS: Tuple[ControllerSettingsGroup, ...] = (
+    ControllerSettingsGroup("Tidepool Loop 2.x", "2_0_v1", "base", temp_basal_only=False),
+    ControllerSettingsGroup("Tidepool Loop 1.x", "1dotx", "1xComparator", temp_basal_only=True),
+)
+DEFAULT_SETTINGS_GROUP = SETTINGS_GROUPS[0]
+
+# Dosing strategies, default first. These are display labels because they are also
+# what lands in metadata (AC 9) -- one spelling, not a code token plus a label that
+# can drift from it.
+DOSING_AUTOBOLUS = "Autobolus"
+DOSING_TEMP_BASAL = "Temp basal"
+DOSING_STRATEGIES: Tuple[str, ...] = (DOSING_AUTOBOLUS, DOSING_TEMP_BASAL)
+DEFAULT_DOSING_STRATEGY = DOSING_AUTOBOLUS
+
+# What "temp basal" means as a config value: partial_application_factor 0.0, which
+# is falsy, which is what SwiftLoopController reads to choose tempBasal. Only ever
+# written for 2.x -- 1.x already has it.
+TEMP_BASAL_PARTIAL_APPLICATION_FACTOR = 0.0
+
+# Stated wherever Loop 1.x is offered, so the editor and the generator cannot word
+# the coupling differently.
+LOOP_1X_TEMP_BASAL_ONLY_NOTE = (
+    "Tidepool Loop 1.x is temp-basal only, so Autobolus is not available with it."
+)
+
+
+@dataclass(frozen=True)
 class Stage:
     """One of the three simulation stages a risk config defines.
 
@@ -232,6 +284,35 @@ class MealConfigSpec:
     pump: EntrySet
     duration_hours: Optional[float] = None
     risk_description: Optional[str] = None
+    settings_group: ControllerSettingsGroup = DEFAULT_SETTINGS_GROUP
+    dosing_strategy: str = DEFAULT_DOSING_STRATEGY
+
+    @property
+    def resolved_dosing_strategy(self) -> str:
+        """The dosing strategy this spec actually generates with.
+
+        A temp-basal-only settings group forces Temp basal regardless of what the
+        field holds. Resolving here rather than in the app means a spec built
+        directly -- by a test, or by any future caller -- cannot express the
+        1.x + Autobolus combination that has no config to generate, and means the
+        label written to metadata is the one the config actually reflects.
+        """
+        if self.settings_group.temp_basal_only:
+            return DOSING_TEMP_BASAL
+        return self.dosing_strategy
+
+    @property
+    def writes_temp_basal_override(self) -> bool:
+        """Whether generation writes a partial_application_factor override.
+
+        True only for a group whose settings file does not already say temp basal.
+        1.x carries 0.0 in its own file, so overriding would restate what the base
+        already resolves to (AC 6).
+        """
+        return (
+            self.resolved_dosing_strategy == DOSING_TEMP_BASAL
+            and not self.settings_group.temp_basal_only
+        )
 
     @classmethod
     def aligned(
@@ -240,6 +321,8 @@ class MealConfigSpec:
         entries: EntrySet,
         duration_hours: Optional[float] = None,
         risk_description: Optional[str] = None,
+        settings_group: ControllerSettingsGroup = DEFAULT_SETTINGS_GROUP,
+        dosing_strategy: str = DEFAULT_DOSING_STRATEGY,
     ) -> "MealConfigSpec":
         """Spec whose pump timeline is the same entry set as the patient model's."""
         return cls(
@@ -248,6 +331,8 @@ class MealConfigSpec:
             pump=entries,
             duration_hours=duration_hours,
             risk_description=risk_description,
+            settings_group=settings_group,
+            dosing_strategy=dosing_strategy,
         )
 
 
@@ -293,15 +378,66 @@ def standard_carb_grams(profile: Profile) -> float:
     return float(entries[0]["value"])
 
 
-def base_config_pointer(profile: Profile) -> str:
-    """The ``reusable.*`` pointer for this profile's 2_0/swift base simulation."""
-    return f"reusable.simulations.base_{profile.token}_2_0_v1"
+def base_config_pointer(
+    profile: Profile, settings_group: ControllerSettingsGroup = DEFAULT_SETTINGS_GROUP
+) -> str:
+    """The ``reusable.*`` pointer for this profile's base simulation in this group.
+
+    No subdirectory in the pointer: ``load_pointer`` searches ``simulations/`` and
+    each of its known subdirectories, so one spelling reaches both the 2.x bases in
+    ``base/`` and the 1.x bases in ``1xComparator/``.
+    """
+    return f"reusable.simulations.base_{profile.token}_{settings_group.token}"
 
 
-def _base_config_path(profile: Profile) -> str:
+def _base_config_path(
+    profile: Profile, settings_group: ControllerSettingsGroup = DEFAULT_SETTINGS_GROUP
+) -> str:
     return os.path.join(
-        _reusable_dir(), "simulations", "base", f"base_{profile.token}_2_0_v1.json"
+        _reusable_dir(),
+        "simulations",
+        settings_group.subdir,
+        f"base_{profile.token}_{settings_group.token}.json",
     )
+
+
+def guardrails_settings(profile: Profile) -> dict:
+    """This profile's post-mitigation guardrails controller settings, read from disk.
+
+    Read rather than restated for the same reason ``standard_carb_grams`` is: the
+    inline form written for 2.x + Temp basal (AC 5) has to be the guardrails file
+    plus one key, so that a change to the guardrails library flows through instead
+    of being silently overridden by a constant here.
+    """
+    path = os.path.join(
+        _reusable_dir(),
+        "mitigations",
+        "guardrails",
+        f"controller_settings_{profile.token}_swift.json",
+    )
+    if not os.path.isfile(path):
+        raise MealConfigError(
+            f"Guardrails controller settings for {profile.display} not found: {path}"
+        )
+    settings = _load_json(path)
+    if not settings:
+        raise MealConfigError(
+            f"Guardrails controller settings for {profile.display} is empty: {path}"
+        )
+    return settings
+
+
+def autobolus_application_factor() -> float:
+    """The fraction of a correction autobolus delivers, read from the 2.x settings.
+
+    The UI states this as a percentage (AC 12). Read from the same file the 2.x
+    base config points at, so the tooltip cannot claim a number the generated
+    configs do not produce.
+    """
+    path = os.path.join(_reusable_dir(), "loop_settings", "2_0_v1.json")
+    if not os.path.isfile(path):
+        raise MealConfigError(f"Loop 2.x settings not found: {path}")
+    return float(_load_json(path)["partial_application_factor"])
 
 
 def base_window(profile: Profile = PROFILES[0]) -> Tuple[datetime.datetime, float]:
@@ -309,6 +445,11 @@ def base_window(profile: Profile = PROFILES[0]) -> Tuple[datetime.datetime, floa
 
     All four T1 base configs share one window; the profile argument exists so that
     stays checkable rather than assumed.
+
+    Deliberately read from the default (2.x) group rather than the selected one: the
+    1.x bases carry the identical window, and the authoring window must not shift
+    under the user when they change controller settings. If the two groups' windows
+    ever diverge, this is the line that has to learn about the group.
     """
     path = _base_config_path(profile)
     if not os.path.isfile(path):
@@ -669,14 +810,40 @@ def _stage_override(
         },
     }
     if not stage.loop_enabled:
+        # The No Loop stage is untouched by the controller-settings choice (AC 8):
+        # there is no controller to configure.
         override["controller"] = None
     elif stage.mitigated:
+        override["controller"] = {"settings": _mitigated_settings(profile, spec)}
+    elif spec.writes_temp_basal_override:
+        # The pre-mitigation stage has no controller block at all by default -- it
+        # inherits the base config's. Temp basal on 2.x is the one selection that
+        # gives it one, carrying the single overriding key.
         override["controller"] = {
-            "settings": (
-                f"reusable.mitigations.guardrails.controller_settings_{profile.token}_swift"
-            )
+            "settings": {
+                "partial_application_factor": TEMP_BASAL_PARTIAL_APPLICATION_FACTOR
+            }
         }
     return override
+
+
+def _mitigated_settings(profile: Profile, spec: MealConfigSpec) -> Union[str, dict]:
+    """The post-mitigation stage's ``controller.settings`` for this selection.
+
+    Normally the guardrails pointer string, exactly as before this ticket. The one
+    exception is 2.x + Temp basal, which needs the guardrails values AND the
+    overriding factor in a single settings value -- a pointer cannot express both,
+    so the file is read and inlined with the extra key (AC 5).
+
+    Read, never restated: hardcoding the guardrails numbers would keep this passing
+    after the library changed underneath it.
+    """
+    pointer = f"reusable.mitigations.guardrails.controller_settings_{profile.token}_swift"
+    if not spec.writes_temp_basal_override:
+        return pointer
+    settings = dict(guardrails_settings(profile))
+    settings["partial_application_factor"] = TEMP_BASAL_PARTIAL_APPLICATION_FACTOR
+    return settings
 
 
 def generate_config(spec: MealConfigSpec, generated_risk_id: str, profile: Profile) -> dict:
@@ -692,8 +859,15 @@ def generate_config(spec: MealConfigSpec, generated_risk_id: str, profile: Profi
             "simulation_id": f"{generated_risk_id}-{profile.token}",
             "risk_description": risk_description,
             "config_format_version": CONFIG_FORMAT_VERSION,
+            # The two TRSET-15 axes, as their displayed labels (AC 9), so the
+            # generated file records which controller it was built for and the
+            # summary can echo it back from the JSON rather than the widgets.
+            # Safe to add: every schema_models model sets extra="allow", and
+            # ScenarioParserV2 reads only metadata["simulation_id"].
+            "controller_settings_group": spec.settings_group.display,
+            "dosing_strategy": spec.resolved_dosing_strategy,
         },
-        "base_config": base_config_pointer(profile),
+        "base_config": base_config_pointer(profile, spec.settings_group),
         "override_config": [
             _stage_override(stage, profile, spec, (start, end), duration_hours)
             for stage in STAGES
