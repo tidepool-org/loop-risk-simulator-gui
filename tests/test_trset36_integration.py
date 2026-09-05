@@ -202,12 +202,25 @@ def test_the_summary_echoes_the_description_that_was_written(described_run):
 
 
 def test_the_other_three_metadata_keys_are_untouched(described_run):
-    """AC 14: this feature replaces one value and adds no key."""
+    """AC 14: this feature replaces one value and adds no key.
+
+    The expected set gained ``controller_settings_group`` and ``dosing_strategy`` when
+    TRSET-15 landed. That is TRSET-15's addition, not this feature's, and this test
+    still makes TRSET-36's own claim: the three keys it does not own are untouched, and
+    it adds nothing of its own. Kept as an exact set rather than relaxed to a subset --
+    a subset check would also pass if THIS feature started adding keys, which is the
+    one thing the assertion exists to catch.
+    """
     generated_risk_id = described_run.session_state["generated_risk_id"]
     for filename, config in _on_disk_configs(described_run).items():
         metadata = config["metadata"]
         assert sorted(metadata) == [
-            "config_format_version", "risk_description", "risk_id", "simulation_id",
+            "config_format_version",
+            "controller_settings_group",  # TRSET-15
+            "dosing_strategy",            # TRSET-15
+            "risk_description",
+            "risk_id",
+            "simulation_id",
         ], filename
         assert metadata["risk_id"] == generated_risk_id, filename
         assert metadata["config_format_version"] == meal_config.CONFIG_FORMAT_VERSION

@@ -737,3 +737,79 @@ with no message — which is what makes the mirrored `MealConfigError` unreachab
 the UI, and also means a user pasting 300 characters sees the field stay empty.
 (2) `st.text_area` commits on blur (or Ctrl+Enter), not per keystroke, so a generated
 set is dropped when the field loses focus rather than vanishing mid-sentence.
+
+
+## Controller settings and dosing strategy (TRSET-15)
+
+**What changed (≤100 words):** The *Configure meals & boluses* editor gains two radio
+groups: **Controller settings** (Tidepool Loop 2.x, default; Tidepool Loop 1.x) and
+**Dosing strategy** (Autobolus, default; Temp basal). The settings group chooses
+`base_config` — `base_<profile>_2_0_v1` or `base_<profile>_1dotx` — for all four T1
+profiles. 2.x + Temp basal writes `partial_application_factor: 0.0` on both Loop
+stages, inlining the guardrails file's contents on the post-mitigation stage. Both
+choices land in `metadata` and are echoed in the summary, read back from the JSON.
+Changing either invalidates a generated set. No parser, schema, `gui_runner` or
+`severity_model` change.
+
+Loop 1.x is temp-basal only, and the two controls are coupled accordingly: selecting
+it removes Autobolus from the options rather than showing it and ignoring it.
+`1dotX.json` already ships `partial_application_factor: 0.0`, and `SwiftLoopController`
+picks `recommendationType` from the truthiness of that value alone, so "1.x +
+Autobolus" would mean overriding the very settings file the choice names — and matches
+no released Loop, since autobolus arrived with 2.x. For the same reason 1.x writes no
+override at all: the base already resolves to temp basal.
+
+`maximum_autobolus` is never written. `resolve_override` applies only keys already
+present in the resolved base and then raises `"Only applied N of M overriding values"`
+on a count mismatch, so writing it would hard-fail the run rather than be ignored.
+
+Example:
+
+```bash
+streamlit run streamlit_app.py     # Configure meals & boluses -> Controller settings -> Generate configs
+```
+
+```python
+import meal_config
+
+two_x, one_x = meal_config.SETTINGS_GROUPS
+spec = meal_config.MealConfigSpec.aligned(
+    mode, entries, settings_group=one_x, dosing_strategy=meal_config.DOSING_AUTOBOLUS
+)
+spec.resolved_dosing_strategy      # -> "Temp basal"  (1.x forces it)
+spec.writes_temp_basal_override    # -> False         (1dotX.json already says 0.0)
+```
+
+**Breaking change (§6):** the generated-config output schema moves. Every generated
+file's `metadata` gains `controller_settings_group` and `dosing_strategy`, and in the
+2.x + Temp basal combination the pre-mitigation stage gains a `controller` key it did
+not have before. The only consumer is the export bundle, which ships the configs
+verbatim. Additions are safe for the run: every model in `schema_models.py` sets
+`extra="allow"`, and `ScenarioParserV2` reads only `metadata["simulation_id"]` from
+that block. **Rollback note:** reverting restores the four-key `metadata` and removes
+the pre-mitigation `controller` key; configs generated while this was in place stay
+readable, since both additions are ignored by the parser.
+
+**Validation (≤100 words):** `tests/test_trset15_integration.py` — 46 tests to the
+approved five-phase plan, no mocks, real configs under the
+`LOOP_RISK_GUI_SCENARIO_CONFIGS_ROOT` seam. Per-combination config shape across all
+four profiles; the guardrails inline dict compared against the file read at test time,
+never against literals; `maximum_autobolus` asserted absent recursively; a no-delta
+comparison against the committed pre-change fixture; the 1.x coupling and the
+Autobolus-selected transition; metadata, echo and invalidation both ways; every
+combination validated and parsed; one real 2-hour end-to-end run on 2.x + Temp basal.
+Three mutation checks kill their tests. Suite: 405 passed, 7 skipped, 1 deselected.
+
+**Cautions / limitations:** (1) Switching to Loop 1.x and back to 2.x leaves **Temp
+basal** selected rather than restoring Autobolus — the last thing shown selected is
+what stays selected, since silently re-enabling a dosing strategy is the worse
+surprise. (2) The info text and per-option captions are written from the ticket's
+described behaviour, **not** copied from its verbatim UI copy, which is not recorded
+in the request; the tests assert the module constants rather than the strings, so
+replacing the wording is a one-line change. (3) Streamlit radios have no per-option
+tooltip, so the per-option text renders as captions beneath each option — more
+discoverable than a hover tooltip, but not hidden. (4) Loop 1.x reaches the four
+`base_<profile>_1dotx` configs, whose settings pointer casing is corrected by
+simulator-side **TRSET-48**; on a case-sensitive filesystem 1.x is broken until that
+lands. (5) Loop 1.x *results* change when simulator-side **TRSET-49** lands — this
+suite deliberately asserts config shape only, never 1.x results.
